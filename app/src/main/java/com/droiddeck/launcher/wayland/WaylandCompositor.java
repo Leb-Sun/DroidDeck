@@ -60,11 +60,47 @@ public final class WaylandCompositor {
         if (gameListener == l) gameListener = null;
     }
 
+    /** Every frame the HUD counts, to whoever else wants its time (the Performance report's frame
+     *  times): as many taps as are added, beside the HUD's single {@link GameListener}. */
+    public interface FrameTap {
+        /** One GPU frame of the HUD's window, at {@code nanos} ({@link System#nanoTime()}). Compositor
+         *  thread, once a frame: store it and return - no allocation, no lock. */
+        void onFrame(long nanos);
+        /** The window counted changed or closed, so the next frame is not this window's next.
+         *  Compositor thread. */
+        default void onWindowChanged() {}
+    }
+
+    private static final FrameTap[] NO_TAPS = new FrameTap[0];
+    /** Replaced, never changed in place: a frame walks the array it read, with no lock and no copy. */
+    private static volatile FrameTap[] frameTaps = NO_TAPS;
+
+    public static synchronized void addFrameTap(FrameTap tap) {
+        FrameTap[] taps = frameTaps;
+        for (FrameTap t : taps) if (t == tap) return;
+        FrameTap[] next = java.util.Arrays.copyOf(taps, taps.length + 1);
+        next[taps.length] = tap;
+        frameTaps = next;
+    }
+
+    public static synchronized void removeFrameTap(FrameTap tap) {
+        FrameTap[] taps = frameTaps;
+        for (int i = 0; i < taps.length; i++) {
+            if (taps[i] != tap) continue;
+            FrameTap[] next = taps.length == 1 ? NO_TAPS : new FrameTap[taps.length - 1];
+            System.arraycopy(taps, 0, next, 0, i);
+            System.arraycopy(taps, i + 1, next, i, taps.length - i - 1);
+            frameTaps = next;
+            return;
+        }
+    }
+
     /** Invoked from native (droiddeck_on_game_surface). */
     @SuppressWarnings("unused")
     static void onGameSurface(String window, String gpuName) {
         GameListener l = gameListener;
         if (l != null) l.onGameSurface(window, gpuName);
+        for (FrameTap tap : frameTaps) tap.onWindowChanged();
     }
 
     private static volatile long lastFrameNanos;
@@ -93,6 +129,7 @@ public final class WaylandCompositor {
         }
         GameListener l = gameListener;
         if (l != null) l.onGameFrame();
+        for (FrameTap tap : frameTaps) tap.onFrame(now);
     }
 
     /** Invoked from native (droiddeck_on_game_program) once per game window that starts presenting. */

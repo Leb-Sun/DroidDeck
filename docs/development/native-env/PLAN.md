@@ -61,8 +61,9 @@ What remains is mostly structural:
   - the updater offers it nothing, since no catalog lists the package.
 - **A/B within one install.** New mechanisms sit behind toggles. The baseline is the same build
   with the toggles off, so a comparison never mixes packages, runtimes or signatures.
-- **Over adb.** `tools/droiddeckctl` hardcodes `com.droiddeck.launcher` and needs a package option
-  before it can drive the test app.
+- **Over adb.** The owner runs adb from Termux on the phone itself (Wireless debugging,
+  `adb connect localhost:<port>`), so scripted runs go through `tools/droiddeckctl` under Termux's
+  Python. It hardcodes `com.droiddeck.launcher` until the harness adds a package option.
 
 ## Phases and gates
 

@@ -31,7 +31,9 @@
  * PROOT_FP_KEY=<key>, with PROOT_FASTPATH=<key> in proot's own environment: nothing is answered
  * here unless the tracer is that proot (traced_by_match).
  * PROOT_FP_OFF=1 disables it; PROOT_FP_STATS=1 reports hits and misses at exit, and
- * PROOT_FP_LOG=<file> appends every call left to proot to that file.
+ * PROOT_FP_LOG=<file> appends every call left to proot to that file. PROOT_FP_STATS_DIR=<dir> keeps
+ * the hits and misses, by call family, in a file per process in <dir> that the launcher can read at
+ * any moment (live_counters).
  */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -86,7 +88,22 @@ static int nbinds;
 static char root[PATH_MAX];
 static size_t rootlen;
 static long long ttl_ns = 2000000000LL;
-static unsigned long hits, misses;
+
+/* Call families, for the hit and miss counts. The order is part of the counter file's format. */
+enum { FAM_OPEN, FAM_STAT, FAM_ACCESS, FAM_PATH, FAM_WRITE, FAM_SOCKET, FAM_OTHER, FAM_N };
+/* [0] hits, [1] calls left to proot; this process's own, or its counter file's (live_counters). */
+static uint64_t own_counts[2][FAM_N];
+static uint64_t (*counts)[FAM_N] = own_counts;
+static int family(const char *call);
+/* Relaxed atomics: a counter file is shared with every child forked before it execs. */
+static inline void count(int kind, int fam) { __atomic_fetch_add(&counts[kind][fam], 1, __ATOMIC_RELAXED); }
+/* A call answered here, under the family of the function it was answered in, looked up once. */
+#define HIT() do { \
+    static int fam_ = -1; \
+    int f_ = __atomic_load_n(&fam_, __ATOMIC_RELAXED); \
+    if (f_ < 0) __atomic_store_n(&fam_, f_ = family(__func__), __ATOMIC_RELAXED); \
+    count(0, f_); \
+  } while (0)
 
 static long sc(long nr, long a, long b, long c, long d, long e) { return fp_sys(nr, a, b, c, d, e, 0); }
 static void fp_init(void);
@@ -104,8 +121,25 @@ static int under(const char *path, const char *dir, size_t dlen) {
 
 /* ---------------------------------------------------------------- setup */
 
+/* The family of the function a call was answered or left to proot in, from its name. */
+static int family(const char *call) {
+  static const struct { const char *part; int fam; } names[] = {
+      {"shm_", FAM_OTHER}, {"statfs", FAM_OTHER}, {"statvfs", FAM_OTHER}, {"passwd", FAM_OTHER},
+      {"open", FAM_OPEN}, {"stat", FAM_STAT}, {"access", FAM_ACCESS},
+      {"readlink", FAM_PATH}, {"realpath", FAM_PATH}, {"getcwd", FAM_PATH},
+      {"mkdir", FAM_WRITE}, {"unlink", FAM_WRITE}, {"rename", FAM_WRITE}, {"symlink", FAM_WRITE},
+      {"chmod", FAM_WRITE}, {"utime", FAM_WRITE}, {"truncate", FAM_WRITE},
+      {"connect", FAM_SOCKET}, {"bind", FAM_SOCKET}, {"accept", FAM_SOCKET}, {"name_common", FAM_SOCKET},
+  };
+  for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+    if (strstr(call, names[i].part)) return names[i].fam;
+  return FAM_OTHER;
+}
+
 static void stats(void) {
   char line[160];
+  unsigned long hits = 0, misses = 0;
+  for (int f = 0; f < FAM_N; f++) hits += counts[0][f], misses += counts[1][f];
   int n = snprintf(line, sizeof line, "fastpath[%d] %s: %lu fast, %lu to proot\n", getpid(),
                    program_invocation_short_name, hits, misses);
   if (write(2, line, n) < 0) {}
@@ -116,7 +150,7 @@ static long fp_open(int dirfd, const char *path, int flags, mode_t mode);
 
 /* A call left to proot. Opened for each line: a program may close or reuse any descriptor kept. */
 static void missed(const char *call, int dirfd, const char *path) {
-  misses++;
+  count(1, family(call));
   if (!miss_log) return;
   char line[2 * PATH_MAX + 128], base[PATH_MAX] = "";
   if (path && path[0] != '/' && dirfd != AT_FDCWD) {
@@ -208,6 +242,8 @@ static int in_tracer(struct bind *bd) {
   return 1;
 }
 
+static void live_counters(const char *dir);
+
 static void fp_init(void) {
   const char *r = getenv("PROOT_FP_ROOT"), *b = getenv("PROOT_FP_BINDS"), *t = getenv("PROOT_FP_TTL_MS");
   const char *key = getenv("PROOT_FP_KEY");
@@ -218,11 +254,21 @@ static void fp_init(void) {
     if (p != MAP_FAILED) { munmap(p, FP_STUB_SIZE); return; }
     if (errno != EEXIST) return; /* mapped already: this library loaded twice */
   } else {
+#if defined(__x86_64__)
+    /* The same stub for x86_64, for the host tests (tools/tests/test_proot_stats.py). */
+    static const uint8_t code[] = {
+        0x48, 0x89, 0xf8, /* mov rax, rdi */  0x48, 0x89, 0xf7, /* mov rdi, rsi */
+        0x48, 0x89, 0xd6, /* mov rsi, rdx */  0x48, 0x89, 0xca, /* mov rdx, rcx */
+        0x4d, 0x89, 0xc2, /* mov r10, r8 */   0x4d, 0x89, 0xc8, /* mov r8, r9 */
+        0x4c, 0x8b, 0x4c, 0x24, 0x08, /* mov r9, [rsp+8] */  0x0f, 0x05, /* syscall */  0xc3, /* ret */
+    };
+#else
     static const uint32_t code[] = {
         0xAA0003E8, /* mov x8, x0 */  0xAA0103E0, /* mov x0, x1 */  0xAA0203E1, /* mov x1, x2 */
         0xAA0303E2, /* mov x2, x3 */  0xAA0403E3, /* mov x3, x4 */  0xAA0503E4, /* mov x4, x5 */
         0xAA0603E5, /* mov x5, x6 */  0xD4000001, /* svc #0 */      0xD65F03C0, /* ret */
     };
+#endif
     memcpy(p, code, sizeof code);
     __builtin___clear_cache((char *)p, (char *)p + sizeof code);
     if (mprotect(p, FP_STUB_SIZE, PROT_READ | PROT_EXEC) != 0) { munmap(p, FP_STUB_SIZE); return; }
@@ -268,6 +314,7 @@ static void fp_init(void) {
   for (int i = 0; i < nbinds; i++)
     if (under(binds[i].host, "/proc/self", 10) && !in_tracer(&binds[i])) { fp_sys = NULL; return; }
   pthread_atfork(NULL, NULL, after_fork); /* registered once per exec */
+  live_counters(getenv("PROOT_FP_STATS_DIR"));
   fp_on = 1;
   if (getenv("PROOT_FP_STATS")) atexit(stats);
   miss_log = getenv("PROOT_FP_LOG");
@@ -816,6 +863,46 @@ static long resolve(int dirfd, const char *path, int how, struct res *r) {
   return resolve_as(dirfd, path, how, 0, r);
 }
 
+/*
+ * PROOT_FP_STATS_DIR=<dir>: this process's hits and misses live in <dir>/<program>.<pid>, mapped
+ * MAP_SHARED, so the launcher can add them up by program at any moment, with nothing to flush at
+ * exit. Made once per exec, at the end of fp_init (so resolve_in, not resolve, which waits for it),
+ * with the trampoline's untraced calls; a child counts into its parent's file until it execs, and a
+ * program run again under the same pid carries on its counts. The magic is written last.
+ */
+struct fp_counters {
+  char magic[8]; /* "FPSTATS" */
+  uint32_t version, families, pid, reserved;
+  char name[32];
+  uint64_t counts[2][FAM_N];
+};
+
+static void live_counters(const char *dir) {
+  struct res r = {.named = 1};
+  char name[32], path[PATH_MAX];
+  size_t n = 0;
+  if (!dir || dir[0] != '/') return;
+  if (resolve_in(NULL, dir, 1, &r) != 0 || !S_ISDIR(r.st.st_mode)) return;
+  for (const char *c = program_invocation_short_name; *c && *c != ' ' && n < sizeof name - 1; c++)
+    name[n++] = *c == '/' ? '_' : *c;
+  name[n] = 0;
+  if (snprintf(path, sizeof path, "%s/%s.%d", r.host, n ? name : "unknown", getpid()) >= (int)sizeof path) return;
+  long fd = sc(SYS_openat, AT_FDCWD, (long)path, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600, 0);
+  if (fd < 0) return;
+  long p = sc(SYS_ftruncate, fd, sizeof(struct fp_counters), 0, 0, 0) == 0
+           ? fp_sys(SYS_mmap, 0, sizeof(struct fp_counters), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : -EIO;
+  sc(SYS_close, fd, 0, 0, 0, 0);
+  if ((unsigned long)p >= -4095UL) return;
+  struct fp_counters *f = (struct fp_counters *)p;
+  f->version = 1;
+  f->families = FAM_N;
+  f->pid = getpid();
+  memcpy(f->name, name, sizeof name);
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+  memcpy(f->magic, "FPSTATS", sizeof f->magic);
+  counts = f->counts;
+}
+
 /* "name/" makes the kernel follow a final link; calls that act on the link itself leave it to proot. */
 static int trailing_slash(const char *path) {
   size_t len = path ? strlen(path) : 0;
@@ -833,7 +920,7 @@ static int ret(long r) {
 
 /* An answer from here (r != FP_SLOW) or the real call. */
 #define ANSWER(r, dirfd, path, real_call) \
-  do { long r_ = (r); if (r_ != FP_SLOW) { hits++; return ret(r_); } missed(__func__, dirfd, path); return real_call; } while (0)
+  do { long r_ = (r); if (r_ != FP_SLOW) { HIT(); return ret(r_); } missed(__func__, dirfd, path); return real_call; } while (0)
 
 /* ---------------------------------------------------------------- open */
 
@@ -852,7 +939,7 @@ static long fp_open(int dirfd, const char *path, int flags, mode_t mode) {
 
 static int do_openat(int dirfd, const char *path, int flags, mode_t mode, int (*real)(int, const char *, int, ...)) {
   long r = fp_open(dirfd, path, flags, mode);
-  if (r != FP_SLOW) { hits++; return ret(r); }
+  if (r != FP_SLOW) { HIT(); return ret(r); }
   missed(__func__, dirfd, path);
   return real(dirfd, path, flags, mode);
 }
@@ -921,7 +1008,7 @@ int lstat64(const char *p, struct stat64 *st) { return lstat(p, (struct stat *)s
 int fstat(int fd, struct stat *st) {
   REAL(fstat, int (*)(int, struct stat *));
   if (!fp_ready()) return real_fstat(fd, st);
-  hits++;
+  HIT();
   return ret(sc(SYS_fstat, fd, (long)st, 0, 0, 0));
 }
 int fstat64(int fd, struct stat64 *st) { return fstat(fd, (struct stat *)st); }
@@ -956,7 +1043,7 @@ int statx(int dirfd, const char *path, int flags, unsigned mask, struct statx *o
   struct res r;
   long rs;
   if ((flags & AT_EMPTY_PATH) && !path[0] && fp_ready()) {
-    hits++;
+    HIT();
     return ret(sc(SYS_statx, dirfd, (long)"", flags, mask, (long)out));
   }
   rs = (flags & ~(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE)) ? FP_SLOW
@@ -986,7 +1073,7 @@ static int access_common(int dirfd, const char *path, int mode, int flags) {
   if (rs == 1) rs = -ENOENT;
   if (rs == 0 && S_ISLNK(r.st.st_mode)) rs = FP_SLOW;
   if (rs == 0 || rs == UNSEEN) rs = sc(SYS_faccessat, AT_FDCWD, (long)r.host, mode, 0, 0);
-  if (rs != FP_SLOW) { hits++; return ret(rs); }
+  if (rs != FP_SLOW) { HIT(); return ret(rs); }
   missed(__func__, dirfd, path);
   /* glibc tries faccessat2 first, which Android answers with SIGSYS: a second round trip. */
   if (flags == 0) return (int)syscall(SYS_faccessat, dirfd, path, mode);
@@ -1032,7 +1119,7 @@ static ssize_t readlink_common(int dirfd, const char *path, char *buf, size_t si
     missed(__func__, dirfd, path);
     return real_readlinkat(dirfd, path, buf, size);
   }
-  hits++;
+  HIT();
   if (rs < 0) return ret(rs);
   size_t n = rs;
   if (!changed) {
@@ -1075,7 +1162,7 @@ char *realpath(const char *path, char *resolved) {
   long rs = resolve_as(AT_FDCWD, path, 1, 1, &r);
   if (rs == 0 && !r.named) rs = FP_SLOW;
   if (rs == FP_SLOW) { missed(__func__, AT_FDCWD, path); return real_realpath(path, resolved); }
-  hits++;
+  HIT();
   if (rs == 1) rs = -ENOENT;
   if (rs < 0) { errno = (int)-rs; return NULL; }
   size_t n = strlen(r.guest) + 1;
@@ -1099,7 +1186,7 @@ char *getcwd(char *buf, size_t size) {
   REAL(getcwd, char *(*)(char *, size_t));
   char g[PATH_MAX];
   if (!fp_ready() || own_cwd(g) == FP_SLOW) { missed(__func__, AT_FDCWD, "."); return real_getcwd(buf, size); }
-  hits++;
+  HIT();
   size_t need = strlen(g) + 1;
   if (buf && size == 0) { errno = EINVAL; return NULL; }
   if (buf && size < need) { errno = ERANGE; return NULL; }
@@ -1190,7 +1277,7 @@ static int rename_common(int olddirfd, const char *old, int newdirfd, const char
       if (rs == 0) forget();
     }
   }
-  if (rs != FP_SLOW) { hits++; return ret(rs); }
+  if (rs != FP_SLOW) { HIT(); return ret(rs); }
   missed(__func__, olddirfd, old);
   /* renameat, not renameat2: it is the one proot follows to move the cwd it keeps. */
   if (!flags) return (int)syscall(SYS_renameat, olddirfd, old, newdirfd, new);
@@ -1336,7 +1423,7 @@ static ssize_t getxattr_common(const char *path, const char *name, void *value, 
   long rs = resolve(AT_FDCWD, path, follow | MAY_BE_UNSEEN, &r);
   if (rs == 1) rs = -ENOENT;
   if (rs == 0 || rs == UNSEEN) rs = sc(follow ? SYS_getxattr : SYS_lgetxattr, (long)r.host, (long)name, (long)value, size, 0);
-  if (rs != FP_SLOW) { hits++; return rs < 0 ? ret(rs) : rs; }
+  if (rs != FP_SLOW) { HIT(); return rs < 0 ? ret(rs) : rs; }
   missed(__func__, AT_FDCWD, path);
   return real(path, name, value, size);
 }
@@ -1355,7 +1442,7 @@ static ssize_t listxattr_common(const char *path, char *list, size_t size, int f
   long rs = resolve(AT_FDCWD, path, follow | MAY_BE_UNSEEN, &r);
   if (rs == 1) rs = -ENOENT;
   if (rs == 0 || rs == UNSEEN) rs = sc(follow ? SYS_listxattr : SYS_llistxattr, (long)r.host, (long)list, size, 0, 0);
-  if (rs != FP_SLOW) { hits++; return rs < 0 ? ret(rs) : rs; }
+  if (rs != FP_SLOW) { HIT(); return rs < 0 ? ret(rs) : rs; }
   missed(__func__, AT_FDCWD, path);
   return real(path, list, size);
 }
@@ -1471,7 +1558,7 @@ static int pending(int fd) {
 static int accept_common(int fd, struct sockaddr *addr, socklen_t *len, int flags) {
   REAL(accept4, int (*)(int, struct sockaddr *, socklen_t *, int));
   if (!fp_ready() || (addr && !len) || (!nonblocking(fd) && !pending(fd))) { missed(__func__, AT_FDCWD, "(accept)"); return real_accept4(fd, addr, len, flags); }
-  hits++;
+  HIT();
   if (!addr) return ret(sc(SYS_accept4, fd, 0, 0, flags, 0));
   struct sockaddr_storage got;
   socklen_t got_len = sizeof got;
@@ -1484,7 +1571,7 @@ int accept(int fd, struct sockaddr *addr, socklen_t *len) { return accept_common
 
 static int name_common(long nr, int fd, struct sockaddr *addr, socklen_t *len, int (*real)(int, struct sockaddr *, socklen_t *)) {
   if (!fp_ready() || !addr || !len) { missed(__func__, AT_FDCWD, "(name)"); return real(fd, addr, len); }
-  hits++;
+  HIT();
   struct sockaddr_storage got;
   socklen_t got_len = sizeof got;
   long r = sc(nr, fd, (long)&got, (long)&got_len, 0, 0);
@@ -1533,7 +1620,7 @@ DIR *opendir(const char *path) {
   REAL(opendir, DIR *(*)(const char *));
   long fd = fp_open(AT_FDCWD, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NONBLOCK, 0);
   if (fd == FP_SLOW) { missed(__func__, AT_FDCWD, path); return real_opendir(path); }
-  hits++;
+  HIT();
   if (fd < 0) { errno = (int)-fd; return NULL; }
   DIR *d = fdopendir((int)fd);
   if (!d) close((int)fd);
@@ -1552,7 +1639,7 @@ static FILE *fopen_common(const char *path, const char *m, FILE *(*real)(const c
   if (strchr(m, 'x')) flags |= O_EXCL;
   long fd = fp_open(AT_FDCWD, path, flags, 0666);
   if (fd == FP_SLOW) { missed(__func__, AT_FDCWD, path); return real(path, m); }
-  hits++;
+  HIT();
   if (fd < 0) { errno = (int)-fd; return NULL; }
   FILE *f = fdopen((int)fd, m);
   if (!f) close((int)fd);
@@ -1585,7 +1672,7 @@ static int online_cpus(void) {
 int get_nprocs(void) {
   REAL(get_nprocs, int (*)(void));
   int n = fp_ready() ? online_cpus() : -1;
-  if (n > 0) { hits++; return n; }
+  if (n > 0) { HIT(); return n; }
   missed(__func__, AT_FDCWD, "(nprocs)");
   return real_get_nprocs();
 }
@@ -1632,7 +1719,7 @@ int gethostname(char *name, size_t len) {
   REAL(gethostname, int (*)(char *, size_t));
   struct utsname u;
   if (own_uname(&u) == FP_SLOW) { missed(__func__, AT_FDCWD, "(gethostname)"); return real_gethostname(name, len); }
-  hits++;
+  HIT();
   size_t n = strlen(u.nodename) + 1;
   memcpy(name, u.nodename, len < n ? len : n);
   if (n > len) { errno = ENAMETOOLONG; return -1; }
@@ -1645,7 +1732,7 @@ int isatty(int fd) {
   REAL(isatty, int (*)(int));
   struct termios k;
   if (!fp_ready()) return real_isatty(fd);
-  hits++;
+  HIT();
   long r = sc(SYS_ioctl, fd, TCGETS, (long)&k, 0, 0);
   if (r < 0) { errno = (int)-r; return 0; }
   return r == 0;
@@ -1660,7 +1747,7 @@ int memfd_create(const char *name, unsigned flags) {
       || !fp_ready()) return real_memfd_create(name, flags);
   long r = sc(SYS_memfd_create, (long)name, flags, 0, 0, 0);
   if (r == -ENOSYS) return real_memfd_create(name, flags);
-  hits++;
+  HIT();
   return ret(r);
 }
 
@@ -1767,7 +1854,7 @@ static int passwd_r(const char *name, uid_t uid, struct passwd *pw, char *buf, s
     missed(name ? "getpwnam" : "getpwuid", AT_FDCWD, "(passwd)");
     return name ? real_name(name, pw, buf, buflen, result) : real_uid(uid, pw, buf, buflen, result);
   }
-  hits++;
+  HIT();
   *result = pw;
   errno = 0;
   return 0;
@@ -1793,7 +1880,7 @@ static struct passwd *passwd_static(const char *name, uid_t uid) {
   int own = own_passwd(name, uid, &static_pw, static_pw_buf, sizeof static_pw_buf);
   pthread_mutex_unlock(&static_pw_lock);
   if (!own) return NULL;
-  hits++;
+  HIT();
   errno = 0;
   return &static_pw;
 }

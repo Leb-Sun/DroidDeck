@@ -397,6 +397,17 @@ object SessionPrefs {
         prefs(context).edit().putBoolean("prootFastPath", on).apply()
     }
 
+    /**
+     * Whether sessions write a performance report (SessionPerf): proot's stops, the tracer's CPU and
+     * the fast path's hits through each phase, into perf-report.txt and .json in the session's logs.
+     * Off by default, and off nothing is counted.
+     */
+    fun perfReport(context: Context): Boolean = prefs(context).getBoolean("perfReport", false)
+
+    fun setPerfReport(context: Context, on: Boolean) {
+        prefs(context).edit().putBoolean("perfReport", on).apply()
+    }
+
     const val DEFAULT_GUEST_HOSTNAME = "DroidDeck"
 
     @JvmStatic

@@ -56,6 +56,7 @@ object SessionEvents {
     }
 
     fun record(event: String, fields: Map<String, Any?> = emptyMap(), directory: File? = null) {
+        SessionPerf.event(event, fields)
         val dir = directory ?: SessionState.logDirectory ?: SessionPaths.current() ?: return
         val target = if (directory == null) SessionState.eventsFile ?: File(dir, "events.jsonl")
             else File(dir, "events.jsonl")

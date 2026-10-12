@@ -46,6 +46,7 @@ fun PerformancePage(
     gpuClockPin: Boolean,
     prootNoSeccomp: Boolean,
     prootFastPath: Boolean,
+    perfReport: Boolean,
     guestHostname: String,
     phantomWarning: String?,
     onClientOverride: (Boolean) -> Unit,
@@ -61,6 +62,8 @@ fun PerformancePage(
     onGpuClockPin: (Boolean) -> Unit,
     onProotNoSeccomp: (Boolean) -> Unit,
     onProotFastPath: (Boolean) -> Unit,
+    onPerfReport: (Boolean) -> Unit,
+    onCopyPerfReport: () -> Unit,
     onGuestHostname: (String) -> Unit,
     onClientCore: (Int, Boolean) -> Unit,
     onGameCore: (Int, Boolean) -> Unit,
@@ -157,6 +160,17 @@ fun PerformancePage(
                 if (prootNoSeccomp) stringResource(R.string.perf_fastpath_needs_seccomp)
                 else stringResource(R.string.perf_fastpath_hint),
                 prootFastPath && !prootNoSeccomp, enabled = !prootNoSeccomp, onChange = onProotFastPath,
+            )
+        }
+        SettingsGroup(stringResource(R.string.perf_measure)) {
+            ToggleRow(
+                host, "perfreport", stringResource(R.string.perf_report),
+                stringResource(R.string.perf_report_hint),
+                perfReport, onChange = onPerfReport,
+            )
+            ActionRow(
+                stringResource(R.string.perf_report_copy), stringResource(R.string.perf_report_copy_hint),
+                stringResource(R.string.perf_report_copy_button), onCopyPerfReport,
             )
         }
         SettingsGroup(stringResource(R.string.perf_identity)) {

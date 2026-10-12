@@ -283,6 +283,7 @@ class SessionService : Service() {
      */
     private fun collectSessionArtifacts(dir: File) {
         try {
+            SessionPerf.awaitEnd(dir, PERF_END_WAIT_MS)
             SessionArtifacts.collect(this, dir, "session stopped")
         } finally {
             // Last, so everything above is in the file it is about - and only this session's:
@@ -338,6 +339,8 @@ class SessionService : Service() {
 
         val sessionDir = openSessionFolder()
         val sessionLog = File(sessionDir, "session.log")
+        // Performance > Performance report; null, and nothing counted, when it is off.
+        val perf = SessionPerf.begin(this, sessionDir)
 
         Log.i(TAG, GpuClockPin.start(this))
 
@@ -444,6 +447,8 @@ class SessionService : Service() {
                 val env = ProotFastPath.guestEnv(root, prootBinds, key)
                 guest.addAll(fastPathAt, env)
                 shellGuest.addAll(fastPathAt, env)
+                // The session's own processes count their hits for the report; a terminal's do not.
+                perf?.let { guest.add(fastPathAt, "PROOT_FP_STATS_DIR=" + it.fastPathDir.path) }
                 Log.i(TAG, "proot: fast path on (${prootBinds.size} binds)")
             } ?: run {
                 Log.w(TAG, "proot: fast path off - ${prootBinds.size} binds (it holds ${ProotFastPath.MAX_BINDS}) or a path it cannot be told")
@@ -480,6 +485,13 @@ class SessionService : Service() {
         }
         if (gen == sessionGen && SessionState.running) {
             SessionTerminal.prepare(terminalCommand, terminalHostEnvironment.map { (key, value) -> "$key=$value" }.toTypedArray(), root, gen)
+        }
+        // After the terminal's environment was taken from it: a terminal's proot would start the
+        // session's stop counters over.
+        perf?.let {
+            it.fastPathActive = fastPathKey != null
+            hostEnv["PROOT_STATS"] = it.prootStats.path
+            Log.i(TAG, "performance report on: ${SessionPerf.REPORT_TEXT} in the session's logs")
         }
 
         // Whether the client signs in to Valve or starts offline: read once, while it starts, and
@@ -1831,6 +1843,8 @@ class SessionService : Service() {
             "steamwebhelper", "linuxfs/opt/android-host/proot", "/libproot.so", "pulseaudio/libpulseaudio.so")
         /** How long proot gets to run its own cleanup before it is killed outright. */
         private const val GRACE_MS = 1200L
+        /** The performance report's last read, at the end milestone: thousands of small files at most. */
+        private const val PERF_END_WAIT_MS = 10_000L
         private const val STEAM_PICKUP_MS = 1500L
         private const val STEAM_EXIT_MS = 10_000L
         private const val GAME_LAUNCH_RETRY_MS = 250L

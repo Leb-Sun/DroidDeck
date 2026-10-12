@@ -532,6 +532,14 @@
     <string name="perf_fastpath">proot fast path</string>
     <string name="perf_fastpath_needs_seccomp">Needs proot\'s seccomp filter.</string>
     <string name="perf_fastpath_hint">Faster file lookups and less stutter. Turn off if a program can\'t find its files.</string>
+    <string name="perf_measure">Measurement</string>
+    <string name="perf_report">Performance report</string>
+    <string name="perf_report_hint">Counts proot\'s traps, its CPU time and the fast path\'s hits through each session, into perf-report.txt in the session\'s logs. Off, nothing is counted.</string>
+    <string name="perf_report_copy">Last report</string>
+    <string name="perf_report_copy_hint">The newest session\'s summary, to paste into a chat. Share logs carries the full report.</string>
+    <string name="perf_report_copy_button">Copy</string>
+    <string name="perf_report_copied">Performance report copied</string>
+    <string name="perf_report_none">No session has written a performance report yet</string>
     <string name="perf_identity">Session identity</string>
     <string name="perf_hostname">Host name</string>
     <string name="perf_hostname_hint">The name Steam sees for this device. Blank restores %1$s.</string>

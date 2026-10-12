@@ -119,6 +119,7 @@ decides which layer goes first, and what "faster" means in numbers.
 | 2026-10-11 | At most two agents at a time | Keeps usage even and keeps each step reviewable. |
 | 2026-10-12 | Build a measurement harness before any change | `01` found no device numbers for a real session (traps per second, tracer CPU, hit rates, load times); nothing could be shown to help without them. |
 | 2026-10-12 | **Gate 1:** proot as the safety net, native wherever it can be, with the app as the container (four layers, above) | Both Phase 1 reports converge on it. It is the only direction that is low-risk at every step (each miss falls back to proot), works at any targetSdk, and still ends with untraced processes. |
+| 2026-10-12 | Spike verdict (`04`): layer 3 **go**, layer 4 **go with conditions** | Glibc 2.43 with six small patches ran a whole dynamic userland untraced under a simulated Android filter, at native speed, with no escapes; stock glibc dies at `set_robust_list`. Exec through `ld.so`, shebangs and `/proc/self/exe` work without a tracer. Conditions: the Wine and game tree stays on proot (static `wine-preloader`, raw `svc`); the path translator goes into glibc itself; device validation before any toggle defaults on. |
 
 ## Documents
 
@@ -128,4 +129,5 @@ decides which layer goes first, and what "faster" means in numbers.
 - `02-landscape-and-constraints.md`: other projects, interception technology, and the limits
   Android puts on a non-root app (Phase 1).
 - `harness.md`: how to take a baseline on the device, and what the report measures (Phase 1).
-- `03-design.md`, `04-spikes.md`: the layered design and its feasibility spikes (Phase 2).
+- `03-design.md`: the layered design and the milestones (Phase 2, in progress).
+- `04-spikes.md`, `tools/native/`: the feasibility spike for layers 3 and 4, and its prototype (Phase 2).

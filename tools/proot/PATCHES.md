@@ -92,3 +92,21 @@ Prototype (inert unless `PROOT_FASTPATH` is set; see `docs/development/proot-per
   first tracee starts at `-w`'s, so relative lookups inside the tracee resolve where proot would.
   SM8850 (adb shell): `stat` 25.3 -> 0.6 us, `open+close` 25.3 -> 0.9 us, ENOENT 22.9 -> 1.6 us,
   8 threads `stat`ing 89k -> 3.6M/s; equivalence suite (`bench/equiv.py`) byte-identical to proot.
+
+Measurement (inert unless `PROOT_STATS` is set; see `docs/development/native-env/harness.md`):
+
+- `0015-stop-counters.patch` - with `PROOT_STATS=<file>`, the tracer creates that file once its
+  first tracee runs, maps it `MAP_SHARED` and counts in it as it goes, so another process can read
+  it at any moment: no signal, no syscall on the tracer's side, nothing to flush at exit. Every stop
+  is counted by kind (seccomp entry, `PTRACE_SYSCALL` entry and exit, `SIGSYS`, the clone, fork,
+  vfork, vfork-done, exec and exit events, other signals, and exits) with the `CLOCK_MONOTONIC` time
+  spent handling it, and each syscall the tracee made gets its entry and exit stops, its emulations
+  after a refusal (`SIGSYS`, or `ENOSYS` at the exit) and their time; `wait4` stops are its row.
+  Without `PROOT_STATS` a stop costs one test of a null pointer: `translate_syscall()` and the
+  `SIGSYS` handler only store what they already know. The file is native-endian, every field
+  64-bit aligned: an 8-byte magic `PRSTATS\0` written last; `u32` version (1), header size,
+  number of kinds (12), number of syscalls (proot's `PR_NB_SYSNUM`), name size (32), reserved;
+  `u64` tracer pid, start and last-update times (ns), stops, ns; 16 `u64` stop counts by kind, in
+  the order above, then 16 `u64` ns. After the header, one `{u64 enter, exit, emulated, ns}` per
+  syscall in proot's numbering, then each syscall's name in a field of the name size. Host test:
+  `tools/tests/test_proot_stats.py` with a proot from `bench/host-proot.sh`.

@@ -1,0 +1,451 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DroidDeck <droiddeck@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 00:00:00 +0000
+Subject: [PATCH] stats: count the tracer's stops in a file another process can
+ read at any moment
+
+With PROOT_STATS=<file> (and only then), the tracer creates that file, maps
+it MAP_SHARED and keeps in it, as it goes: every stop by kind (seccomp entry,
+PTRACE_SYSCALL entry and exit, SIGSYS, clone/fork/vfork/exec/exit events,
+signals, exits) with the CLOCK_MONOTONIC time spent handling them, and, per
+syscall, the entries, exits and refused-syscall emulations it handled with
+their time. A reader takes a snapshot whenever it likes: no signal, no syscall
+on the tracer's side, nothing to flush. Without PROOT_STATS a stop costs one
+test of a null pointer; translate_syscall() and the SIGSYS handler only store
+what they already know.
+---
+ src/GNUmakefile       |   1 +
+ src/syscall/syscall.c |   3 +
+ src/tracee/event.c    |  45 ++++++++---
+ src/tracee/seccomp.c  |   2 +
+ src/tracee/stats.c    | 202 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/tracee/stats.h    |  71 ++++++++++++++++++
+ 6 files changed, 313 insertions(+), 11 deletions(-)
+
+diff --git a/src/GNUmakefile b/src/GNUmakefile
+index 9603557..6d7f470 100644
+--- a/src/GNUmakefile
++++ b/src/GNUmakefile
+@@ -51,6 +51,7 @@ OBJECTS += \
+ 	tracee/event.o		\
+ 	tracee/seccomp.o        \
+ 	tracee/statx.o		\
++	tracee/stats.o		\
+ 	ptrace/ptrace.o		\
+ 	ptrace/user.o		\
+ 	ptrace/wait.o		\
+diff --git a/src/syscall/syscall.c b/src/syscall/syscall.c
+index 9ab063c..91e0e95 100644
+--- a/src/syscall/syscall.c
++++ b/src/syscall/syscall.c
+@@ -30,6 +30,7 @@
+ #include "extension/extension.h"
+ #include "tracee/tracee.h"
+ #include "tracee/reg.h"
++#include "tracee/stats.h"
+ #include "tracee/mem.h"
+ #include "cli/note.h"
+ 
+@@ -142,6 +143,7 @@ void translate_syscall(Tracee *tracee)
+ 		if (tracee->chain.syscalls == NULL) {
+ 			tracee->sysexit_unneeded = false;
+ 			save_current_regs(tracee, ORIGINAL);
++			stats_note_regs(tracee, STATS_NOTED_ENTER);
+ 			status = translate_syscall_enter(tracee);
+ 			save_current_regs(tracee, MODIFIED);
+ 
+@@ -214,6 +216,7 @@ void translate_syscall(Tracee *tracee)
+ 		 * chained by PRoot.  */
+ 		if (tracee->chain.syscalls == NULL || tracee->chain.sysnum_workaround_state == SYSNUM_WORKAROUND_PROCESS_REPLACED_CALL) {
+ 			tracee->chain.sysnum_workaround_state = SYSNUM_WORKAROUND_INACTIVE;
++			stats_note_regs(tracee, STATS_NOTED_EXIT);
+ 			translate_syscall_exit(tracee);
+ 		}
+ 		else if (tracee->chain.sysnum_workaround_state == SYSNUM_WORKAROUND_PROCESS_FAULTY_CALL) {
+diff --git a/src/tracee/event.c b/src/tracee/event.c
+index d2b4547..c8f7801 100644
+--- a/src/tracee/event.c
++++ b/src/tracee/event.c
+@@ -39,6 +39,7 @@
+ #include "tracee/seccomp.h"
+ #include "tracee/mem.h"
+ #include "tracee/reg.h"
++#include "tracee/stats.h"
+ #include "cli/note.h"
+ #include "path/path.h"
+ #include "path/binding.h"
+@@ -263,6 +264,29 @@ static void check_architecture(Tracee *tracee)
+ 		"http://static.proot.me/proot-x86_64");
+ }
+ 
++/**
++ * Hand the event @tracee_status of @tracee to the extensions, the
++ * ptrace emulation and handle_tracee_event(), then restart it.
++ */
++static inline void handle_stop(Tracee *tracee, int tracee_status)
++{
++	int signal;
++	int status;
++
++	status = notify_extensions(tracee, NEW_STATUS, tracee_status, 0);
++	if (status != 0)
++		return;
++
++	if (tracee->as_ptracee.ptracer != NULL) {
++		bool keep_stopped = handle_ptracee_event(tracee, tracee_status);
++		if (keep_stopped)
++			return;
++	}
++
++	signal = handle_tracee_event(tracee, tracee_status);
++	(void) restart_tracee(tracee, signal);
++}
++
+ /**
+  * Wait then handle any event from any tracee.  This function returns
+  * the exit status of the last terminated program.
+@@ -330,10 +354,11 @@ int event_loop()
+ 			note(NULL, WARNING, SYSTEM, "sigaction(%d)", signum);
+ 	}
+ 
++	stats_init();
++
+ 	while (1) {
+ 		int tracee_status;
+ 		Tracee *tracee;
+-		int signal;
+ 		pid_t pid;
+ 
+ 		/* This is the only safe place to free tracees.  */
+@@ -355,18 +380,16 @@ int event_loop()
+ 
+ 		tracee->running = false;
+ 
+-		status = notify_extensions(tracee, NEW_STATUS, tracee_status, 0);
+-		if (status != 0)
+-			continue;
++		/* PROOT_STATS: timed and counted, see tracee/stats.h.  */
++		if (stats_file == NULL)
++			handle_stop(tracee, tracee_status);
++		else {
++			StatsStop stop;
+ 
+-		if (tracee->as_ptracee.ptracer != NULL) {
+-			bool keep_stopped = handle_ptracee_event(tracee, tracee_status);
+-			if (keep_stopped)
+-				continue;
++			stats_stop_begin(&stop, tracee, tracee_status);
++			handle_stop(tracee, tracee_status);
++			stats_stop_end(&stop);
+ 		}
+-
+-		signal = handle_tracee_event(tracee, tracee_status);
+-		(void) restart_tracee(tracee, signal);
+ 	}
+ 
+ 	return last_exit_status;
+diff --git a/src/tracee/seccomp.c b/src/tracee/seccomp.c
+index 77d5b27..69fcad2 100644
+--- a/src/tracee/seccomp.c
++++ b/src/tracee/seccomp.c
+@@ -15,6 +15,7 @@
+ #include "tracee/seccomp.h"
+ #include "tracee/mem.h"
+ #include "tracee/statx.h"
++#include "tracee/stats.h"
+ #include "path/path.h"
+ 
+ static int handle_seccomp_event_common(Tracee *tracee);
+@@ -122,6 +123,7 @@ static int handle_seccomp_event_common(Tracee *tracee)
+ 	Sysnum sysnum = get_sysnum(tracee, CURRENT);
+ 
+ 	sysnum = get_sysnum(tracee, CURRENT);
++	stats_note_emulated(sysnum);
+ 
+ 	status = notify_extensions(tracee, SIGSYS_OCC, 0, 0);
+ 	if (status < 0) {
+diff --git a/src/tracee/stats.c b/src/tracee/stats.c
+new file mode 100644
+index 0000000..8fbfa7e
+--- /dev/null
++++ b/src/tracee/stats.c
+@@ -0,0 +1,202 @@
++/*
++ * Stop counters (PROOT_STATS=<file>), see tracee/stats.h.
++ *
++ * The file is this header, then PR_NB_SYSNUM StatsSysnum (indexed by proot's syscall numbering),
++ * then PR_NB_SYSNUM names of name_size bytes, in the tracer's byte order and alignment.  The
++ * magic is written last, so a reader that sees it sees the rest.  Each 64-bit counter is a single
++ * aligned store, which a reader on another CPU never sees torn.
++ */
++
++#include <fcntl.h>      /* open(2), O_*, */
++#include <signal.h>     /* SIG*, */
++#include <stdlib.h>     /* getenv(3), */
++#include <string.h>     /* memcpy(3), strncpy(3), */
++#include <sys/mman.h>   /* mmap(2), */
++#include <sys/ptrace.h> /* PTRACE_EVENT_*, */
++#include <sys/wait.h>   /* WIFSTOPPED, */
++#include <time.h>       /* clock_gettime(2), */
++#include <unistd.h>     /* ftruncate(2), close(2), getpid(2), */
++
++#include "tracee/stats.h"
++#include "cli/note.h"
++#include "compat.h"
++
++#define STATS_VERSION 1
++#define STATS_KINDS_MAX 16
++#define STATS_NAME_SIZE 32
++
++typedef struct {
++	char magic[8];			/* "PRSTATS" */
++	uint32_t version;
++	uint32_t header_size;
++	uint32_t nb_kinds;
++	uint32_t nb_sysnums;
++	uint32_t name_size;
++	uint32_t reserved;
++	uint64_t pid;
++	uint64_t started_ns;		/* CLOCK_MONOTONIC, when the file was mapped */
++	uint64_t updated_ns;		/* CLOCK_MONOTONIC, at the end of the last stop */
++	uint64_t stops;
++	uint64_t ns;			/* spent handling stops */
++	uint64_t kind_stops[STATS_KINDS_MAX];
++	uint64_t kind_ns[STATS_KINDS_MAX];
++} StatsHeader;
++
++typedef struct {
++	uint64_t enter;
++	uint64_t exit;
++	uint64_t emulated;
++	uint64_t ns;
++} StatsSysnum;
++
++StatsNote stats_note;
++void *stats_file = NULL;
++
++static StatsHeader *header;
++static StatsSysnum *sysnums;
++
++static uint64_t now_ns(void)
++{
++	struct timespec now;
++
++	(void) clock_gettime(CLOCK_MONOTONIC, &now);
++	return (uint64_t) now.tv_sec * 1000000000ULL + (uint64_t) now.tv_nsec;
++}
++
++/**
++ * Create and map the file PROOT_STATS names, if it does, starting every counter at zero.  Called
++ * by the tracer once its first tracee runs, so no tracee inherits the mapping.
++ */
++void stats_init(void)
++{
++	const char *path = getenv("PROOT_STATS");
++	size_t size;
++	char *names;
++	void *map;
++	int fd;
++	int i;
++
++	if (path == NULL || path[0] == '\0')
++		return;
++
++	size = sizeof(StatsHeader) + PR_NB_SYSNUM * (sizeof(StatsSysnum) + STATS_NAME_SIZE);
++	fd = open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
++	if (fd < 0) {
++		note(NULL, WARNING, SYSTEM, "PROOT_STATS: can't open %s", path);
++		return;
++	}
++	map = ftruncate(fd, size) == 0
++		? mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
++		: MAP_FAILED;
++	close(fd);
++	if (map == MAP_FAILED) {
++		note(NULL, WARNING, SYSTEM, "PROOT_STATS: can't map %s", path);
++		return;
++	}
++
++	header = map;
++	sysnums = (StatsSysnum *) (header + 1);
++	names = (char *) (sysnums + PR_NB_SYSNUM);
++	for (i = 0; i < PR_NB_SYSNUM; i++)
++		strncpy(names + i * STATS_NAME_SIZE, stringify_sysnum(i), STATS_NAME_SIZE - 1);
++
++	header->version = STATS_VERSION;
++	header->header_size = sizeof(StatsHeader);
++	header->nb_kinds = STATS_NB_KINDS;
++	header->nb_sysnums = PR_NB_SYSNUM;
++	header->name_size = STATS_NAME_SIZE;
++	header->pid = getpid();
++	header->started_ns = now_ns();
++	__atomic_thread_fence(__ATOMIC_RELEASE);
++	memcpy(header->magic, "PRSTATS", sizeof(header->magic));
++
++	stats_file = map;
++}
++
++/**
++ * Start timing the stop @tracee_status of @tracee, and tell what kind it is.
++ */
++void stats_stop_begin(StatsStop *stop, const Tracee *tracee, int tracee_status)
++{
++	stats_note.what = STATS_NOTED_NONE;
++	stop->start_ns = now_ns();
++
++	if (!WIFSTOPPED(tracee_status)) {
++		stop->kind = STATS_GONE;
++		return;
++	}
++
++	/* Not WSTOPSIG(): it clears the PTRACE_EVENT_* bits.  */
++	switch ((tracee_status & 0xfff00) >> 8) {
++	case SIGTRAP | 0x80:
++		stop->kind = IS_IN_SYSENTER(tracee) ? STATS_SYSENTER : STATS_SYSEXIT;
++		break;
++	case SIGTRAP | PTRACE_EVENT_SECCOMP2 << 8:
++	case SIGTRAP | PTRACE_EVENT_SECCOMP << 8:
++		stop->kind = STATS_SECCOMP;
++		break;
++	case SIGTRAP | PTRACE_EVENT_CLONE << 8:
++		stop->kind = STATS_CLONE;
++		break;
++	case SIGTRAP | PTRACE_EVENT_FORK << 8:
++		stop->kind = STATS_FORK;
++		break;
++	case SIGTRAP | PTRACE_EVENT_VFORK << 8:
++		stop->kind = STATS_VFORK;
++		break;
++	case SIGTRAP | PTRACE_EVENT_VFORK_DONE << 8:
++		stop->kind = STATS_VFORK_DONE;
++		break;
++	case SIGTRAP | PTRACE_EVENT_EXEC << 8:
++		stop->kind = STATS_EXEC;
++		break;
++	case SIGTRAP | PTRACE_EVENT_EXIT << 8:
++		stop->kind = STATS_EXIT;
++		break;
++	case SIGSYS:
++		stop->kind = STATS_SIGSYS;
++		break;
++	default:
++		stop->kind = STATS_SIGNAL;
++		break;
++	}
++}
++
++/**
++ * Count the stop started by stats_stop_begin() and the time spent on it, under its kind and under
++ * the syscall it handled, if one was noted.
++ */
++void stats_stop_end(const StatsStop *stop)
++{
++	const uint64_t end = now_ns();
++	const uint64_t ns = end - stop->start_ns;
++	StatsSysnum *counters;
++	Sysnum sysnum;
++
++	header->stops++;
++	header->ns += ns;
++	header->kind_stops[stop->kind]++;
++	header->kind_ns[stop->kind] += ns;
++	header->updated_ns = end;
++
++	switch (stats_note.what) {
++	case STATS_NOTED_ENTER:
++	case STATS_NOTED_EXIT:
++		sysnum = get_sysnum(stats_note.tracee, ORIGINAL);
++		break;
++	case STATS_NOTED_EMULATED:
++		sysnum = stats_note.sysnum;
++		break;
++	default:
++		return;
++	}
++
++	counters = &sysnums[sysnum < PR_NB_SYSNUM ? sysnum : PR_void];
++	if (stats_note.what == STATS_NOTED_ENTER)
++		counters->enter++;
++	else if (stats_note.what == STATS_NOTED_EXIT)
++		counters->exit++;
++	else
++		counters->emulated++;
++	counters->ns += ns;
++}
+diff --git a/src/tracee/stats.h b/src/tracee/stats.h
+new file mode 100644
+index 0000000..695cec1
+--- /dev/null
++++ b/src/tracee/stats.h
+@@ -0,0 +1,71 @@
++#ifndef TRACEE_STATS_H
++#define TRACEE_STATS_H
++
++/*
++ * Stop counters (PROOT_STATS=<file>): the tracer keeps them in a file it maps MAP_SHARED and
++ * updates in place, so another process can read them at any moment, with no signal to send and
++ * nothing to flush at exit.  Without PROOT_STATS a stop costs one test of a null pointer.
++ */
++
++#include <stdint.h>
++
++#include "tracee/tracee.h"
++#include "syscall/sysnum.h"
++
++/* What a stop was, from the status waitpid() reported.  The order is part of the file format.  */
++typedef enum {
++	STATS_SECCOMP = 0,	/* PTRACE_EVENT_SECCOMP: the entry of a syscall the filter traces */
++	STATS_SYSENTER,		/* PTRACE_SYSCALL stop at a syscall entry */
++	STATS_SYSEXIT,		/* PTRACE_SYSCALL stop at a syscall exit */
++	STATS_SIGSYS,		/* SIGSYS, from Android's seccomp policy */
++	STATS_CLONE,
++	STATS_FORK,
++	STATS_VFORK,
++	STATS_VFORK_DONE,
++	STATS_EXEC,
++	STATS_EXIT,		/* PTRACE_EVENT_EXIT */
++	STATS_SIGNAL,		/* any other signal-delivery stop */
++	STATS_GONE,		/* exited or killed: reported by waitpid(), not a stop */
++	STATS_NB_KINDS
++} StatsKind;
++
++typedef enum {
++	STATS_NOTED_NONE = 0,
++	STATS_NOTED_ENTER,	/* the syscall in the tracee's ORIGINAL registers, at its entry */
++	STATS_NOTED_EXIT,	/* ... at its exit */
++	STATS_NOTED_EMULATED,	/* a syscall the seccomp policy refused, answered by proot */
++} StatsNoted;
++
++/* The syscall the current stop handled, noted where proot already knows it.  Plain stores, made
++ * whether or not PROOT_STATS is set; only stats_stop_end() reads them.  */
++typedef struct {
++	const Tracee *tracee;
++	Sysnum sysnum;
++	StatsNoted what;
++} StatsNote;
++
++typedef struct {
++	uint64_t start_ns;
++	StatsKind kind;
++} StatsStop;
++
++extern StatsNote stats_note;
++extern void *stats_file;
++
++static inline void stats_note_regs(const Tracee *tracee, StatsNoted what)
++{
++	stats_note.tracee = tracee;
++	stats_note.what = what;
++}
++
++static inline void stats_note_emulated(Sysnum sysnum)
++{
++	stats_note.sysnum = sysnum;
++	stats_note.what = STATS_NOTED_EMULATED;
++}
++
++extern void stats_init(void);
++extern void stats_stop_begin(StatsStop *stop, const Tracee *tracee, int tracee_status);
++extern void stats_stop_end(const StatsStop *stop);
++
++#endif /* TRACEE_STATS_H */

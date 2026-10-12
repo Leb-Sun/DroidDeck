@@ -19,16 +19,35 @@ log folder, rewritten at every milestone (so a session that dies still leaves th
   - proot stops per second, by kind and per syscall, and the time proot spent handling them
     (`PROOT_STATS`, patch 0015);
   - the tracer's CPU (`/proc/<proot>/stat`) and the whole session tree's CPU, as % of one core;
+  - every tracer on its own (`tracers`: role, pid, stops/s, tracer %), and the tree under all of
+    them;
   - execs, SIGSYS emulations;
-  - fast-path hits and misses by program and call family (`PROOT_FP_STATS_DIR`).
+  - fast-path hits and misses by program and call family (`PROOT_FP_STATS_DIR`);
+  - frames: how many the screen showed, fps, the 50th, 95th and 99th percentile frame time, and
+    stutters (frame times over twice the target);
+  - battery power, mean and peak, plugged in or not, and thermal headroom at both ends;
+  - memory (VmRSS) of the app and of the session's processes, mean and peak;
+  - the app's processes by who traces them, and the peak count of phantom processes.
+- **Per session:** the teardown time (stop → every session process gone), the game state hints
+  Android was given, and the rootfs's glibc (stock, or a patched build's version).
 - **Context:** device (model, SoC, Android, kernel, page size, CPUs), build label and commit, and
   the toggles in effect, named as `droiddeckctl prefs set session <key>` names them.
 
-The summary is the numbers a comparison needs: time to READY and Big Picture, launch → focus,
-traps/s, tracer %, tree %, execs, SIGSYS and fast-path hit rate per phase, the ten most-trapped
-syscalls, stops by kind, and the fast path's hit rate per program group. Columns in the phase table:
-`traps/s` is proot stops per second; `tracer%` and `tree%` are CPU as a percentage of one core
-(the tree can exceed 100); `fp hit%` is the share of fast-path-eligible calls answered in-process.
+The summary is the numbers a comparison needs: time to READY and Big Picture, launch → focus and
+teardown; traps/s, tracer %, tree %, execs, SIGSYS, fast-path hit rate, fps and p99 frame time per
+phase; power and phantoms; the ten most-trapped syscalls, stops by kind, and the fast path's hit rate
+per program group. Columns in the phase table:
+- `traps/s` is the session proot's stops per second;
+- `tracer%` and `tree%` are CPU as a percentage of one core (the tree can exceed 100);
+- `fp hit%` is the share of fast-path-eligible calls answered in-process;
+- `fps` and `p99 ms` are the frames the screen showed, and the frame time 99% of them beat;
+- `game t/s`, only once a game has a proot of its own (`03-design.md` M10), is that proot's stops
+  per second.
+
+The `power` line has the mean battery power over the session, idle in Big Picture and in game, and
+the thermal headroom at the first and last milestone (1.0 is where Android throttles hard). The
+`session` line has the peak phantom count, how many processes each tracer traced at most and how
+many ran untraced, peak memory, the glibc and the number of game state hints.
 
 ## Capabilities
 
@@ -127,14 +146,46 @@ report against one without.
    - The last step's answer, in `~/runs/perf-baseline-*/run-01/steps.json`, holds the summary and
      the report.
 
+## A/B: one toggle, on and off
+
+`03-design.md` §6.3. The same scripted run, alternating a toggle, then a comparison:
+
+```sh
+termux-wake-lock
+tools/droiddeck-scenario tools/scenarios/perf-baseline.json --var appId=<steam app id> \
+    --ab gameStateHints=false,true --repeat 3 --out ~/runs
+tools/perf-compare ~/runs/perf-baseline-<date>-<time>
+```
+
+- `--ab <key>=<A>,<B>` runs the scenario's steps in A B B A order, `--repeat` times over (3 gives
+  six runs of each). Before each run, `prefs set session <key> <value>`; the type is `bool` for
+  `true`/`false`, `int` for numbers, else `string` (`--ab-type` to say). The scenario must start a
+  fresh session after that, as `perf-baseline.json` does: a toggle takes effect at session start.
+- Between runs, a cool-down of `--cooldown` seconds (180) at the app's home, so heat from one run
+  does not slow the next.
+- After each run, the report is fetched into the run's folder (`run-NN/perf-report.json` and
+  `.txt`), once the session's teardown time is in it (up to 30 s after the stop), and `ab.json`
+  names the arm. A run that left no new report fails.
+- The toggle is left at A's value at the end.
+- `tools/perf-compare <folders or reports…>` groups the runs by the key (from `ab.json`, else
+  `--key`, else the one toggle that differs) and prints each metric's median and spread
+  (max − min) for A and B, and the delta. **win**: the delta beats the larger of 5% of A and A's
+  spread, for the better. **REGRESSION**: the same, for the worse, on a guarded metric (READY, Big
+  Picture, launch → focus, teardown, peak phantoms, and in game: fps, p99, power and tree %). It
+  exits 1 on a regression. It reads `droiddeck.perf/1` reports too (their new metrics are left out)
+  and older run folders' `steps.json`. `--json` for the rows as JSON.
+- Keep conditions fixed across all runs, as above. perf-compare notes runs that mixed plugged in and
+  unplugged, failed runs (left out) and arms of fewer than 3 runs.
+
 ## Where things are
 
 | what | where |
 |---|---|
 | reports | `perf-report.json`, `perf-report.txt` in the session folder (`files/logs/<session>/`) |
-| proot's stop counters | `cache/perf/proot.stats`, from `PROOT_STATS` in proot's own environment. The session's proot only: a terminal's does not get it |
+| proot's stop counters | `cache/perf/proot.stats`, from `PROOT_STATS` in proot's own environment. The session's proot only: a terminal's does not get it. Another tracer's file is `proot-<role>-<n>.stats` (`game`, `net`; M10 and later): the report reads every `proot*.stats` by its name, with the pid from the file's header |
 | fast-path counters | `cache/perf/fastpath/<program>.<pid>`, one per exec, from `PROOT_FP_STATS_DIR` in the guest's environment. The session's processes only |
-| code | `session/SessionPerf.kt` (sampling), `PerfReport.kt` (phases, JSON, summary), `PerfCounters.kt` (readers) |
+| code | `session/SessionPerf.kt` (sampling), `PerfSamples.kt` (frames and the per-second samples), `PerfReport.kt` (phases, JSON, summary), `PerfCounters.kt` (readers); the frame tap is `WaylandCompositor.addFrameTap` |
+| A/B | `tools/droiddeck-scenario --ab`, `tools/perf-compare` |
 | capability probe | `files/caps.json` (this boot's); code in `core/CapProbe.kt` and `app/src/main/cpp/hostsys/` |
 
 - `cache/perf` is emptied whenever a session starts, so no earlier counters reach a report. The raw
@@ -146,9 +197,26 @@ report against one without.
   - a 32-byte program name;
   - 7 `u64` hits, then 7 `u64` misses, in the order open, stat, access, path, write, socket, other
     (`live_counters` in `tools/proot/fastpath/fastpath.c`).
-- `perf-report.json` (`schema: droiddeck.perf/1`) has `build`, `device`, `toggles`,
+- `perf-report.json` (`schema: droiddeck.perf/2`) has `build`, `device`, `toggles`,
   `clockTicksPerSecond`, `milestones` (each with its raw totals), `times`, `phases` (deltas, top
   syscalls, fast path by group and program) and `session` (totals, every syscall row, fast path).
+  New in `/2` (readers take `/1` as well):
+  - top level: `frameTargetMs`; `powerUnits` (`current`: `uA` or `mA`, `voltage`: `mV`, `V` or
+    `uV`, `dischargeSign`: the raw current's sign while unplugged, -1 by AOSP's convention);
+    `teardownMs` (null without a `session.teardown_done` event); `hints.gameState` (each
+    `hints.game_state` change with its `atMs`, or null); `glibc {state, pkgver}`;
+  - each milestone: `tracers [{file, role, pid, stops, tracerTicks}]`, `thermalHeadroom`;
+  - each phase, and `session` for the whole: `frames {count, fps, p50Ms, p95Ms, p99Ms, stutters}`,
+    `power {meanMw, peakMw, plugged, samples, raw {currentNowMean, voltageMean}}`,
+    `rssMb {main, sessionTree, game}` (each `{mean, peak}`; `game` null until M10) and
+    `processes {app, tracers, traced {<role>: n}, untraced, peakPhantoms}` (peaks); each phase also
+    `tracers [{role, pid, stops, stopsPerSecond, tracerPct}]` and `thermalHeadroom {start, end}`.
+    A part with nothing read is null.
+- `toggles` has today's keys always, as the app reads them (defaults included), then any of the
+  native environment's (`03-design.md` §6.2: `prootExitKill`, `auditScope`, `fastPathFolded`,
+  `fastPathOpenat2`, `fpSetid`, `fpFexSyscall`, `gameStateHints`, `adpfHints`, `uclampTrial`,
+  `gameProot`, `patchedGlibc`, `nativeClient`, `nativeCef`) that is set, as stored. A key never set
+  is left out. `gameStateHints` shows its effect: false below Android 13.
 
 ## Reading it: limits
 
@@ -168,10 +236,40 @@ report against one without.
   - a launch from inside Steam is seen within a second;
   - focus comes from the guest agent's `focus.changed` events;
   - a game that never takes focus has no launch → focus phase.
+- **Frames** are those of the window the HUD counts: in fullscreen the game's own buffers, which
+  gamescope forwards; with the Steam menu up, gamescope's composition (`03-design.md` §2.2). The
+  target is `1e9 / BL_FPS` with a frame limit, else `1e9 / BL_REFRESH`. No frame time spans a
+  milestone, a change of that window, or a stretch with the screen off or the session suspended
+  (checked each second, so up to two seconds of frames around one are dropped). fps is frames
+  over the frame times counted. Percentiles come from 0.1 ms bins up to 100 ms and 10 ms bins up
+  to 2 s.
+- **Power is a device check.** `BatteryManager`'s `CURRENT_NOW` times the sticky battery
+  broadcast's voltage, each second. The documentation says µA and mV, negative while discharging;
+  OEMs report mA, µV or V, and either sign. The report reads a current under 10,000 as mA and
+  otherwise µA, a voltage under 100 as V and over 100,000 as µV, and drops the sign; `powerUnits`
+  and each phase's `raw` keep what it read, so a wrong guess can be redone. Plugged in, the
+  battery shows its net flow, not the device's draw: compare unplugged runs. Some devices update
+  `CURRENT_NOW` only every few seconds or average it. Thermal headroom (Android 11+) is read at
+  milestones only; Android answers NaN when asked too often, which the report leaves out.
+- **Processes** are every process of the app's uid, once a second (`/proc/<pid>/status`: `Uid`,
+  `PPid`, `TracerPid`, `VmRSS`). The app's own are those zygote started: named after the package or
+  `<package>:<name>`, with a parent that is not the uid's. Every other is a phantom, which is what
+  Android's phantom process limit counts. A tracer is known by its counter file's pid; a process
+  traced by another (a terminal's proot) counts as `other`. Peaks between two samples are missed.
+- **Memory:** `main` is the app's main process; `sessionTree` every tracer, what it traces and their
+  children, so a guest process orphaned to init still counts.
+- **Teardown and game state hints** come from the session's own events (`session.teardown_done`,
+  after the stop; `hints.game_state`, with Performance → Game state hints on). The teardown event
+  comes after the end milestone, so the report is written once more when it does, up to a minute
+  after the stop; a fetch straight after the stop may not have it yet.
 - **Cost with the report on:**
   - per stop, a pair of `clock_gettime` reads and a few stores;
   - per exec that makes a path call, about five untraced syscalls to make its counter file;
-  - in the app, a `/proc` scan each second and a read of every counter file at each milestone.
+  - per presented frame, on the compositor thread, one store into a ring (no allocation, no lock);
+  - in the app, a `/proc` scan each second (now with each uid process's `status`, and the battery)
+    and a read of every counter file at each milestone.
+
+  With the report off, nothing is sampled and no frame tap is registered.
 - **Host tests:**
   - `tools/proot/bench/host-proot.sh <dir>` builds this repo's proot for the host;
   - `DROIDDECK_HOST_PROOT=<dir> python3 -m unittest discover -s tools/tests -p 'test_proot_stats.py'`
@@ -179,3 +277,14 @@ report against one without.
   - `python3 -m unittest discover -s tools/tests -p 'test_native_capprobe.py'` runs the capability
     probe under the spike's simulated app filter (`tools/native/launcher/seccomp-launch`), once per
     profile, and checks that each call comes back blocked or allowed as that profile says.
+
+## Later
+
+What `03-design.md` §6.1 adds and this harness does not have yet:
+
+- `killed9`, tracee deaths by `SIGKILL` (proot's counter file v2, M2);
+- `nativeExecs`, processes that exec'd untraced (fast-path counter file v2, M16);
+- `fastPath.openat2`, the `openat2` sub-count (counter file v2, M11);
+- `spawn {handoffMs, fallbacks[]}` and `:game`'s cgroups (M10), and the `game` memory slot;
+- `device.memoryLimiter`, Android 17's per-app memory budget (M2);
+- `hints {adpf, tids, reports}`, ADPF hint sessions (M7).

@@ -193,6 +193,18 @@ session's logs in its folder, and `report.json` sums up the runs.
 tools/droiddeck-scenario tools/scenarios/steam-game-focus.json --var appId=489830 --repeat 10 --keep-going
 ```
 
+`--ab <key>=<A>,<B>` turns a scenario into an A/B of one session preference: its steps run in
+A B B A order, `--repeat` times over, each after `prefs set session <key> <value>` and a
+`--cooldown` (180 s) after the run before, and the newest performance report is fetched into each
+run's folder with an `ab.json` naming its arm. `tools/perf-compare <output folder>` then prints
+each metric's median and spread for A and B and flags wins and regressions
+(`docs/development/native-env/harness.md`, "A/B").
+
+```sh
+tools/droiddeck-scenario tools/scenarios/perf-baseline.json --var appId=489830 --ab gameStateHints=false,true --repeat 3
+tools/perf-compare scenario-runs/perf-baseline-<date>-<time>
+```
+
 `tools/scenarios/steam-game-focus.json` launches a game, checks it has focus the way a player
 sees it, and quits it: the test that catches a game left behind Steam's loading screen, which only
 shows up in some fraction of launches. A game with a launcher of its own needs the launcher pressed

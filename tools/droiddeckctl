@@ -18,8 +18,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from adb_device import DeviceResolutionError, resolve_serial  # noqa: E402
 
 
-AUTHORITY = "content://com.droiddeck.launcher.agent"
-PACKAGE = "com.droiddeck.launcher"
+DEFAULT_PACKAGE = "com.droiddeck.launcher"
+# The build being driven: --package, else DROIDDECK_PACKAGE, else the released app. A variant or the
+# Environment-work test build (com.droiddeck.env) is the same apk under another package name, and
+# its agent provider's authority follows the package (see use_package).
+PACKAGE = DEFAULT_PACKAGE
+AUTHORITY = f"content://{DEFAULT_PACKAGE}.agent"
+# A renamed package keeps the app's classes where they are, so the activity is named in full.
+AGENT_START_ACTIVITY = "com.droiddeck.launcher.agent.AgentStartActivity"
 STEAM_CLIENT_APP = 769
 REQUEST_CAP = 256 * 1024
 
@@ -28,6 +34,14 @@ class ControlError(RuntimeError):
     def __init__(self, message: str, code: str = "COMMAND_FAILED") -> None:
         super().__init__(message)
         self.code = code
+
+
+def use_package(name: str) -> None:
+    global PACKAGE, AUTHORITY
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+", name):
+        raise ControlError(f"Not an Android package name: {name}", "INVALID_PACKAGE")
+    PACKAGE = name
+    AUTHORITY = f"content://{name}.agent"
 
 
 def adb_path(configured: str | None) -> str:
@@ -117,7 +131,7 @@ def start_agent_activity(adb: str, serial: str, request: dict) -> None:
         "start",
         "-W",
         "-n",
-        f"{PACKAGE}/.agent.AgentStartActivity",
+        f"{PACKAGE}/{AGENT_START_ACTIVITY}",
         "--es",
         "request",
         encoded,
@@ -326,6 +340,7 @@ def input_request(args: argparse.Namespace) -> dict:
 
 
 def execute(args: argparse.Namespace, adb: str, serial: str) -> dict:
+    use_package(getattr(args, "package", None) or os.environ.get("DROIDDECK_PACKAGE") or DEFAULT_PACKAGE)
     command = args.command
 
     if command == "state":
@@ -482,6 +497,20 @@ def execute(args: argparse.Namespace, adb: str, serial: str) -> dict:
             request = {"op": "get", "file": args.file}
         return add_serial(checked(provider_call(adb, serial, "prefs", request=request), "PREFS_FAILED"), serial)
 
+    if command == "perf":
+        response = checked(provider_call(adb, serial, "perf", timeout=60), "PERF_FAILED")
+        if args.out:
+            folder = Path(args.out).expanduser().resolve()
+            try:
+                folder.mkdir(parents=True, exist_ok=True)
+                (folder / "perf-report.txt").write_text(response.get("summary") or "")
+                if response.get("report") is not None:
+                    (folder / "perf-report.json").write_text(json.dumps(response["report"], indent=1))
+            except OSError as exc:
+                raise ControlError(str(exc), "FILE_IO") from exc
+            response["out"] = str(folder)
+        return add_serial(response, serial)
+
     if command == "access":
         return add_serial(checked(provider_call(adb, serial, "access"), "ACCESS_FAILED"), serial)
 
@@ -525,6 +554,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--adb", help="adb executable (defaults to ADB, PATH, or the Android SDK)")
     parser.add_argument("--serial", help="ADB serial; defaults to ADB_SERIAL or ANDROID_SERIAL")
+    parser.add_argument("--package", help=f"the installed build's package, e.g. com.droiddeck.env; "
+                                          f"defaults to DROIDDECK_PACKAGE or {DEFAULT_PACKAGE}")
     commands = parser.add_subparsers(dest="command", required=True)
 
     state = commands.add_parser("state", help="print machine-readable session state")
@@ -652,6 +683,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     commands.add_parser("access", help="whether debugging tools are enabled on the device")
 
+    perf = commands.add_parser("perf", help="the newest session's performance report (Performance > Performance report)")
+    perf.add_argument("--out", help="also write perf-report.txt and perf-report.json into this folder")
+
     logs = commands.add_parser("logs", help="pull the latest session artifact directory")
     logs.add_argument("which", choices=["latest"])
     logs.add_argument("destination", nargs="?")
@@ -678,7 +712,7 @@ EXIT_SESSION = {
     "NO_STEAM_SESSION", "SESSION_NOT_READY", "AGENT_UNAVAILABLE", "LAUNCH_REJECTED", "NO_PAD",
 }
 EXIT_TIMEOUT = {"TIMEOUT", "ARTIFACT_TIMEOUT"}
-EXIT_FILE = {"NO_SESSION_LOGS", "LOG_PULL_FAILED", "SCREENSHOT_FAILED", "FILE_IO", "RECORD_FAILED", "PUSH_FAILED"}
+EXIT_FILE = {"NO_SESSION_LOGS", "NO_PERF_REPORT", "LOG_PULL_FAILED", "SCREENSHOT_FAILED", "FILE_IO", "RECORD_FAILED", "PUSH_FAILED"}
 EXIT_DENIED = {"AGENT_COMMANDS_DISABLED", "PROTECTED_PREFS", "PROTECTED_CONTROL"}
 
 

@@ -18,6 +18,7 @@ import com.droiddeck.launcher.runtime.LinuxRuntime
 import com.droiddeck.launcher.runtime.LinuxRuntimeInstaller
 import com.droiddeck.launcher.session.SessionArtifacts
 import com.droiddeck.launcher.session.SessionEvents
+import com.droiddeck.launcher.session.SessionPerf
 import com.droiddeck.launcher.session.SessionPhase
 import com.droiddeck.launcher.session.SessionService
 import com.droiddeck.launcher.session.SessionState
@@ -101,9 +102,22 @@ class AgentBridgeProvider : ContentProvider() {
             AgentEnv.override(context, request.optString("name")).put("ok", true).put("command", "override")
         }
         "prefs" -> prefs(context, request)
+        "perf" -> perf(context)
         "access" -> JSONObject().put("ok", true).put("commands", AgentAccess.commandsAllowed(context))
             .put("debugBuild", BuildConfig.DEBUG).put("inbox", AgentEnv.inbox(context).absolutePath)
         else -> error("UNKNOWN_COMMAND", "Unknown agent command '$method'")
+    }
+
+    /** The newest session's performance report (SessionPerf): what the Performance page copies, and the rest. */
+    private fun perf(context: Context): JSONObject {
+        val dir = SessionPaths.sessionFolders(context).lastOrNull { File(it, SessionPerf.REPORT_TEXT).isFile }
+            ?: return error("NO_PERF_REPORT", "No session has written a performance report; turn on Performance > Performance report")
+        // The summary always fits; the full report only under the reply limit (Share logs carries it).
+        val report = File(dir, SessionPerf.REPORT_JSON).takeIf { it.isFile && it.length() < 300 * 1024 }
+            ?.let { runCatching { JSONObject(it.readText()) }.getOrNull() }
+        return JSONObject().put("ok", true).put("command", "perf").put("sessionId", dir.name)
+            .put("summary", File(dir, SessionPerf.REPORT_TEXT).readText())
+            .put("report", report ?: JSONObject.NULL)
     }
 
     private fun state(context: Context): JSONObject {

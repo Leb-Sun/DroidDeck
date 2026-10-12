@@ -1,0 +1,85 @@
+{
+  "name": "perf-baseline",
+  "vars": {
+    "appId": 0,
+    "idle": 60,
+    "play": 120
+  },
+  "repeat": 1,
+  "setup": [
+    [
+      "wake"
+    ],
+    [
+      "prefs",
+      "set",
+      "session",
+      "perfReport",
+      "true",
+      "--type",
+      "bool"
+    ],
+    [
+      "stop",
+      "--timeout",
+      "120"
+    ]
+  ],
+  "steps": [
+    [
+      "start",
+      "steam",
+      "--wait",
+      "--timeout",
+      "300"
+    ],
+    [
+      "wait",
+      "focused",
+      "769",
+      "--timeout",
+      "300"
+    ],
+    {
+      "sleep": "${idle}"
+    },
+    [
+      "launch",
+      "${appId}",
+      "--wait",
+      "--timeout",
+      "300"
+    ],
+    {
+      "sleep": "${play}"
+    },
+    [
+      "quit",
+      "${appId}",
+      "--timeout",
+      "30"
+    ],
+    {
+      "sleep": 10
+    },
+    [
+      "stop",
+      "--timeout",
+      "120"
+    ],
+    [
+      "perf"
+    ],
+    {
+      "assert": "summary",
+      "exists": true
+    }
+  ],
+  "teardown": [
+    [
+      "stop",
+      "--timeout",
+      "120"
+    ]
+  ]
+}

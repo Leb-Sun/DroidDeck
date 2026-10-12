@@ -288,6 +288,48 @@ class DroiddeckctlTest(FakeAdbTest):
         self.assertEqual("/sdcard/Android/data/x/files/agent-inbox/gamescope", push["args"][2])
         self.assertEqual({"name": "gamescope"}, self.calls("override")[0]["request"])
 
+    def test_package_names_the_provider_and_the_activity(self):
+        self.configure({"state": state(phase="IDLE")})
+        code, out = self.run_ctl("--package", "com.droiddeck.env", "start", "steam")
+        self.assertEqual(4, code)  # the fake adb's am start does not answer "Status: ok"
+        self.assertEqual("ACTIVITY_START_FAILED", out["error"]["code"])
+        content = [c["args"] for c in self.calls() if c["args"][:3] == ["shell", "content", "call"]]
+        self.assertTrue(content)
+        self.assertTrue(all(a[a.index("--uri") + 1] == "content://com.droiddeck.env.agent" for a in content))
+        start = [c["args"] for c in self.calls() if c["args"][:2] == ["shell", "am"]][0]
+        # The renamed apk keeps the app's classes: the activity is named in full.
+        self.assertIn("com.droiddeck.env/com.droiddeck.launcher.agent.AgentStartActivity", start)
+
+    def test_package_from_the_environment_and_the_default(self):
+        self.configure({"state": state()})
+        os.environ["DROIDDECK_PACKAGE"] = "com.droiddeck.env"
+        try:
+            self.assertEqual(0, self.run_ctl("state")[0])
+        finally:
+            del os.environ["DROIDDECK_PACKAGE"]
+        self.assertEqual(0, self.run_ctl("state")[0])
+        uris = [c["args"][c["args"].index("--uri") + 1] for c in self.calls("state")]
+        self.assertEqual(["content://com.droiddeck.env.agent", "content://com.droiddeck.launcher.agent"], uris)
+
+    def test_a_bad_package_is_refused_before_adb(self):
+        code, out = self.run_ctl("--package", "com.droiddeck.env;rm", "state")
+        self.assertEqual(2, code)
+        self.assertEqual("INVALID_PACKAGE", out["error"]["code"])
+        self.assertFalse(self.calls("state"))
+
+    def test_perf_writes_the_report_where_asked(self):
+        report = {"schema": "droiddeck.perf/1", "times": {"readyS": 20.0}}
+        self.configure({"perf": {"ok": True, "command": "perf", "sessionId": "s1", "summary": "READY 20.0 s\n",
+                                 "report": report}})
+        code, out = self.run_ctl("perf", "--out", str(self.dir / "baseline"))
+        self.assertEqual(0, code)
+        self.assertEqual("READY 20.0 s\n", (self.dir / "baseline" / "perf-report.txt").read_text())
+        self.assertEqual(report, json.loads((self.dir / "baseline" / "perf-report.json").read_text()))
+        self.configure({"perf": {"ok": False, "error": {"code": "NO_PERF_REPORT", "message": "none"}}})
+        code, out = self.run_ctl("perf")
+        self.assertEqual(6, code)
+        self.assertEqual("NO_PERF_REPORT", out["error"]["code"])
+
     def test_override_refused_before_pushing_when_commands_are_off(self):
         self.configure({"access": {"ok": True, "commands": False, "inbox": "/x"}})
         binary = self.dir / "gamescope"
@@ -337,6 +379,23 @@ class ScenarioTest(FakeAdbTest):
         self.assertIn("is 769", report["runs"][0]["error"])
         evidence = json.loads((Path(report["runs"][0]["folder"]) / "evidence.json").read_text())
         self.assertEqual(769, evidence["focus"]["focusedApp"])
+
+    def test_the_package_reaches_every_step(self):
+        self.configure({"state": state(focused=7, focusable=[7])})
+        path = self.write({"name": "t", "steps": [["state"], {"assert": "session.focus.focusedApp", "equals": 7}]})
+        code, report = self.run_scenario(path, "--package", "com.droiddeck.env")
+        self.assertEqual(0, code)
+        self.assertEqual(["content://com.droiddeck.env.agent"],
+                         [c["args"][c["args"].index("--uri") + 1] for c in self.calls("state")])
+
+    def test_the_baseline_scenario_is_droiddeckctl_commands(self):
+        body = scenario.substitute(json.loads((TOOLS / "scenarios/perf-baseline.json").read_text()),
+                                   {"appId": 7, "idle": 0, "play": 0})
+        parser = ctl.build_parser()
+        steps = [s for s in body["setup"] + body["steps"] + body["teardown"] if isinstance(s, list)]
+        self.assertIn(["perf"], steps)
+        for step in steps:
+            parser.parse_args(["--serial", "x"] + [str(w) for w in step])
 
     def test_after_steps_run_after_a_failure(self):
         self.configure({"state": state(focused=769), "quit": {"ok": True, "remaining": []}})

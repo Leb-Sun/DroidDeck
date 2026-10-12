@@ -27,9 +27,18 @@ class FamilyCounts(
 }
 
 /**
- * The session at one milestone: when (ms since the session was created), the tracer's and the whole
- * tree's CPU time in clock ticks, proot's stop counters and the fast path's counts by program. A
- * value that could not be read is null; the "created" milestone, before proot exists, is all zero.
+ * One tracer at a milestone: its counter file (cache/perf/proot*.stats), the role the file's name
+ * gives it (PerfCounters.tracerRole), its pid, its stop counters and its CPU time in clock ticks.
+ */
+class TracerRead(val file: String, val role: String, val pid: Int, val stops: ProotStops?, val ticks: Long?)
+
+/**
+ * The session at one milestone: when (ms since the session was created), the session tracer's and
+ * the whole tree's CPU time in clock ticks, proot's stop counters and the fast path's counts by
+ * program. A value that could not be read is null; the "created" milestone, before proot exists, is
+ * all zero. [tracers] is every tracer's counters (the session's [stops] among them), [samples] what
+ * the scan and the frame tap saw since the milestone before, and [thermalHeadroom]
+ * PowerManager.getThermalHeadroom(10) (null before Android 11, or when it had no answer).
  */
 class PerfSnapshot(
     val label: String,
@@ -41,11 +50,18 @@ class PerfSnapshot(
     val treeProcesses: Int?,
     val stops: ProotStops?,
     val fastPath: Map<String, FamilyCounts>,
+    val tracers: List<TracerRead> = emptyList(),
+    val samples: PerfSamples? = null,
+    val thermalHeadroom: Double? = null,
 )
 
 /**
- * What the report says about the build, the device and the settings, besides the measurements.
- * [caps] is the capability probe's answer (CapProbe), reported as device.caps.
+ * What the report says about the build, the device and the settings, besides the milestones.
+ * [caps] is the capability probe's answer (CapProbe), reported as device.caps. [frameTargetNs] is
+ * the frame time the guest is paced to (a stutter is an interval over twice it), [powerUnits] how
+ * the battery's readings were taken (PerfCounters.powerMw), [teardownMs] the stop until every
+ * session process was gone (session.teardown_done), [gameStates] each hints.game_state change, and
+ * [glibc] the rootfs's glibc-state. Null where the session gave none.
  */
 class PerfInfo(
     val generated: String,
@@ -54,6 +70,11 @@ class PerfInfo(
     val toggles: Map<String, Any?>,
     val ticksPerSecond: Long,
     val caps: Caps? = null,
+    val frameTargetNs: Long? = null,
+    val powerUnits: Map<String, Any?>? = null,
+    val teardownMs: Long? = null,
+    val gameStates: List<Map<String, Any?>>? = null,
+    val glibc: Map<String, Any?>? = null,
 )
 
 /**
@@ -64,7 +85,7 @@ class PerfInfo(
  * launch to focus and in game (to its exit, or the end).
  */
 object PerfReport {
-    const val SCHEMA = "droiddeck.perf/1"
+    const val SCHEMA = "droiddeck.perf/2"
 
     const val CREATED = "created"
     const val PROOT = "proot"
@@ -79,6 +100,9 @@ object PerfReport {
     private const val TOP_PHASE_SYSCALLS = 10
     private const val TOP_PROGRAMS = 40
     private val GROUPS = listOf("steam", "steamwebhelper", "wine", "wineserver", "python", "shell", "gamescope", "fex", "other")
+    /** Tracer roles (PerfCounters.tracerRole). */
+    private const val SESSION = "session"
+    private const val GAME = "game"
     private val NO_STOPS = ProotStops(0, 0, LongArray(PerfCounters.STOP_KINDS.size), LongArray(PerfCounters.STOP_KINDS.size), emptyMap())
 
     class Phase(val name: String, val from: PerfSnapshot, val to: PerfSnapshot) {
@@ -115,6 +139,12 @@ object PerfReport {
             .put("device", JSONObject(info.device).apply { info.caps?.let { put("caps", CapProbe.toJson(it)) } })
             .put("toggles", JSONObject(info.toggles))
             .put("clockTicksPerSecond", info.ticksPerSecond)
+            .put("frameTargetMs", num(info.frameTargetNs?.let { it / 1e6 }))
+            .put("powerUnits", info.powerUnits?.let { JSONObject(it) } ?: JSONObject.NULL)
+            .put("teardownMs", info.teardownMs ?: JSONObject.NULL)
+            .put("hints", JSONObject().put("gameState", info.gameStates?.let { states -> JSONArray().apply { states.forEach { put(JSONObject(it)) } } }
+                ?: JSONObject.NULL))
+            .put("glibc", JSONObject(info.glibc ?: PerfCounters.glibcState(null)))
         json.put("milestones", JSONArray().apply {
             snapshots.forEach { s ->
                 put(JSONObject().put("label", s.label).put("appId", s.appId ?: JSONObject.NULL)
@@ -122,14 +152,22 @@ object PerfReport {
                     .put("tracerTicks", s.tracerTicks ?: JSONObject.NULL).put("treeTicks", s.treeTicks ?: JSONObject.NULL)
                     .put("treeProcesses", s.treeProcesses ?: JSONObject.NULL)
                     .put("stops", s.stops?.let { stopsJson(it) } ?: JSONObject.NULL)
-                    .put("fastPathCalls", s.fastPath.values.sumOf { it.calls }))
+                    .put("fastPathCalls", s.fastPath.values.sumOf { it.calls })
+                    .put("tracers", JSONArray().apply {
+                        s.tracers.forEach { t ->
+                            put(JSONObject().put("file", t.file).put("role", t.role).put("pid", t.pid)
+                                .put("stops", t.stops?.stops ?: JSONObject.NULL).put("tracerTicks", t.ticks ?: JSONObject.NULL))
+                        }
+                    })
+                    .put("thermalHeadroom", num2(s.thermalHeadroom)))
             }
         })
         json.put("times", times(snapshots))
-        json.put("phases", JSONArray().apply { phases(snapshots).forEach { put(phaseJson(it, info.ticksPerSecond)) } })
+        json.put("phases", JSONArray().apply { phases(snapshots).forEach { put(phaseJson(it, snapshots, info.ticksPerSecond)) } })
         val last = snapshots.lastOrNull()
         if (last != null) {
             val session = JSONObject().put("seconds", num(last.atMs / 1000.0))
+            samplesJson(session, sessionSamples(snapshots))
             last.stops?.let { stops ->
                 session.put("stops", stopsJson(stops))
                 session.put("syscalls", JSONObject().apply {
@@ -170,22 +208,32 @@ object PerfReport {
                 val g = games.getJSONObject(i)
                 "launch to focus ${fmt1(g.getDouble("launchToFocusS"))} s (app ${g.getLong("appId")})"
             }
-        }.orEmpty()).joinToString(" · ").ifEmpty { "none reached" })
+        }.orEmpty()).plus(listOfNotNull(info.teardownMs?.let { "teardown ${fmt1(it / 1000.0)} s" }))
+            .joinToString(" · ").ifEmpty { "none reached" })
         line()
         val phases = phases(snapshots)
         if (phases.isNotEmpty()) {
-            line(String.format(Locale.US, "%-20s %7s %8s %8s %7s %6s %6s %7s",
-                "phase", "secs", "traps/s", "tracer%", "tree%", "execs", "sigsys", "fp hit%"))
+            // The game's own tracer gets a column once there is one (03-design.md M10).
+            val game = snapshots.any { s -> s.tracers.any { it.role == GAME } }
+            val columns = "%-20s %7s %8s %8s %7s %6s %6s %7s %6s %6s" + if (game) " %8s" else ""
+            line(String.format(Locale.US, columns,
+                "phase", "secs", "traps/s", "tracer%", "tree%", "execs", "sigsys", "fp hit%", "fps", "p99 ms", "game t/s"))
             phases.forEach { p ->
                 val d = Delta(p, info.ticksPerSecond)
-                line(String.format(Locale.US, "%-20s %7s %8s %8s %7s %6s %6s %7s",
+                val frames = samples(snapshots, p).frames
+                line(String.format(Locale.US, columns,
                     PHASE_NAMES[p.name] ?: p.name, fmt1(p.seconds), d.stops?.let { count(rate(it, p.seconds)) } ?: "-",
                     d.tracerPct?.let { fmt1(it) } ?: "-", d.treePct?.let { fmt1(it) } ?: "-",
                     d.kind("exec")?.toString() ?: "-", d.kind("sigsys")?.toString() ?: "-",
-                    d.fastPath?.let { hitRate(it) }?.let { fmt1(it) } ?: "-"))
+                    d.fastPath?.let { hitRate(it) }?.let { fmt1(it) } ?: "-",
+                    frames.fps?.let { fmt1(it) } ?: "-", frames.percentileMs(0.99)?.let { fmt1(it) } ?: "-",
+                    tracerDeltas(p).filter { it.role == GAME }.mapNotNull { it.stops }.takeIf { it.isNotEmpty() }
+                        ?.let { count(rate(it.sum(), p.seconds)) } ?: "-"))
             }
             line()
         }
+        line("power    " + powerLine(phases, snapshots))
+        line("session  " + sessionLine(info, snapshots))
         val last = snapshots.lastOrNull()
         val stops = last?.stops
         if (stops != null) {
@@ -249,7 +297,7 @@ object PerfReport {
         private fun pct(cpuS: Double, seconds: Double): Double? = if (seconds > 0) cpuS / seconds * 100 else null
     }
 
-    private fun phaseJson(p: Phase, ticksPerSecond: Long): JSONObject {
+    private fun phaseJson(p: Phase, snapshots: List<PerfSnapshot>, ticksPerSecond: Long): JSONObject {
         val d = Delta(p, ticksPerSecond)
         val json = JSONObject().put("name", p.name).put("from", p.from.label).put("to", p.to.label)
             .put("appId", p.appId ?: JSONObject.NULL).put("seconds", num(p.seconds))
@@ -258,6 +306,16 @@ object PerfReport {
             .put("handleMs", d.handleNs?.let { num(it / 1e6) } ?: JSONObject.NULL)
             .put("tracerCpuS", num(d.tracerCpuS)).put("tracerPct", num(d.tracerPct))
             .put("treeCpuS", num(d.treeCpuS)).put("treePct", num(d.treePct))
+        json.put("tracers", JSONArray().apply {
+            tracerDeltas(p).forEach { t ->
+                val cpuS = t.ticks?.takeIf { ticksPerSecond > 0 }?.let { it.toDouble() / ticksPerSecond }
+                put(JSONObject().put("role", t.role).put("pid", t.pid).put("stops", t.stops ?: JSONObject.NULL)
+                    .put("stopsPerSecond", t.stops?.let { num(rate(it, p.seconds)) } ?: JSONObject.NULL)
+                    .put("tracerPct", num(cpuS?.takeIf { p.seconds > 0 }?.let { it / p.seconds * 100 })))
+            }
+        })
+        samplesJson(json, samples(snapshots, p))
+        json.put("thermalHeadroom", JSONObject().put("start", num2(p.from.thermalHeadroom)).put("end", num2(p.to.thermalHeadroom)))
         if (d.stops != null) {
             json.put("kinds", JSONObject().apply {
                 PerfCounters.STOP_KINDS.forEach { k -> d.kind(k)?.takeIf { it != 0L }?.let { put(k, it) } }
@@ -271,6 +329,81 @@ object PerfReport {
         }
         if (p.to.fastPath.isNotEmpty()) json.put("fastPath", fastPathJson(p.to.fastPath, p.from.fastPath, TOP_PROGRAMS))
         return json
+    }
+
+    /** One tracer's counts through a phase: a file that was not there at the phase's start counts from zero. */
+    private class TracerDelta(val role: String, val pid: Int, val stops: Long?, val ticks: Long?)
+
+    private fun tracerDeltas(p: Phase): List<TracerDelta> = p.to.tracers.map { t ->
+        val was = p.from.tracers.firstOrNull { it.file == t.file }
+        val stops = t.stops?.let { now -> if (was == null) now.stops else was.stops?.let { now.stops - it.stops } }
+        val ticks = t.ticks?.let { now -> if (was == null) now else was.ticks?.takeIf { was.pid == t.pid && now >= it }?.let { now - it } }
+        TracerDelta(t.role, t.pid, stops, ticks)
+    }.sortedWith(compareBy({ it.role != SESSION }, { it.role }, { it.pid }))
+
+    /** What the scan and the frame tap saw through [p]: every stretch after its first milestone, to its last. */
+    private fun samples(snapshots: List<PerfSnapshot>, p: Phase): PerfSamples {
+        val from = snapshots.indexOfFirst { it === p.from }
+        val to = snapshots.indexOfFirst { it === p.to }
+        return PerfSamples().apply {
+            if (from >= 0) for (i in from + 1..to) snapshots[i].samples?.let { add(it) }
+        }
+    }
+
+    /** Frames, power, memory and processes, into [json] (a phase's, or the whole session's). */
+    private fun samplesJson(json: JSONObject, s: PerfSamples) {
+        val f = s.frames
+        json.put("frames", if (f.count == 0L) JSONObject.NULL else JSONObject().put("count", f.count).put("fps", num(f.fps))
+            .put("p50Ms", num(f.percentileMs(0.5))).put("p95Ms", num(f.percentileMs(0.95)))
+            .put("p99Ms", num(f.percentileMs(0.99))).put("stutters", f.stutters))
+        json.put("power", if (s.powerSamples == 0) JSONObject.NULL else JSONObject()
+            .put("meanMw", num(s.powerMwMean)).put("peakMw", num(s.powerMwPeak)).put("plugged", s.plugged)
+            .put("samples", s.powerSamples)
+            .put("raw", JSONObject().put("currentNowMean", num(s.currentRawMean)).put("voltageMean", num(s.voltageRawMean))))
+        fun mb(kb: Double?) = num(kb?.let { it / 1024 })
+        json.put("rssMb", if (s.memorySamples == 0) JSONObject.NULL else JSONObject()
+            .put("main", JSONObject().put("mean", mb(s.mainKbMean)).put("peak", mb(s.mainKbPeak.toDouble())))
+            .put("sessionTree", JSONObject().put("mean", mb(s.treeKbMean)).put("peak", mb(s.treeKbPeak.toDouble())))
+            .put("game", JSONObject.NULL))
+        json.put("processes", if (s.processSamples == 0) JSONObject.NULL else JSONObject()
+            .put("app", s.apps).put("tracers", s.tracers).put("traced", JSONObject(s.traced))
+            .put("untraced", s.untraced).put("peakPhantoms", s.phantoms))
+    }
+
+    private fun sessionSamples(snapshots: List<PerfSnapshot>) = PerfSamples().apply { snapshots.forEach { s -> s.samples?.let { add(it) } } }
+
+    /** Mean battery power where the session settles (idle in Big Picture, in game), the plug, thermal headroom. */
+    private fun powerLine(phases: List<Phase>, snapshots: List<PerfSnapshot>): String {
+        val all = sessionSamples(snapshots)
+        if (all.powerSamples == 0) return "no battery reading"
+        val parts = ArrayList<String>()
+        parts += "session ${watts(all.powerMwMean)}"
+        phases.filter { it.name == "idle_big_picture" || it.name == "in_game" }.forEach { p ->
+            val s = samples(snapshots, p)
+            if (s.powerSamples > 0) parts += "${PHASE_NAMES[p.name]} ${watts(s.powerMwMean)}, peak ${watts(s.powerMwPeak)}"
+        }
+        parts += if (all.plugged) "plugged in (the battery's net flow, not the draw)" else "unplugged"
+        val headroom = snapshots.mapNotNull { it.thermalHeadroom }
+        if (headroom.isNotEmpty()) parts += "thermal headroom ${fmt2(headroom.first())} to ${fmt2(headroom.last())}"
+        return parts.joinToString(" · ")
+    }
+
+    /** Peaks over the session (phantom processes, who traces what, memory), then glibc and the game state hints. */
+    private fun sessionLine(info: PerfInfo, snapshots: List<PerfSnapshot>): String {
+        val all = sessionSamples(snapshots)
+        val parts = ArrayList<String>()
+        if (all.processSamples > 0) {
+            parts += "peak phantoms ${all.phantoms}"
+            parts += "traced " + all.traced.entries.joinToString(", ") { (role, n) -> "$n $role" }.ifEmpty { "0" } +
+                ", untraced ${all.untraced}"
+        }
+        if (all.memorySamples > 0) {
+            parts += "rss peak: app ${fmt0(all.mainKbPeak / 1024.0)} MB, session tree ${fmt0(all.treeKbPeak / 1024.0)} MB"
+        }
+        val glibc = info.glibc ?: PerfCounters.glibcState(null)
+        parts += "glibc " + listOfNotNull(glibc["state"], glibc["pkgver"]).joinToString(" ")
+        info.gameStates?.let { parts += "${it.size} game state hints" }
+        return parts.joinToString(" · ")
     }
 
     private fun times(snapshots: List<PerfSnapshot>): JSONObject {
@@ -312,14 +445,27 @@ object PerfReport {
             })
     }
 
+    /**
+     * The report's toggles: [effective], the values the app works out (its defaults, the one sync the
+     * three switches pick), then whatever else [stored] holds, as stored. A key never set is in
+     * neither, and left out.
+     */
+    fun toggles(effective: Map<String, Any?>, stored: Map<String, Any?>): Map<String, Any?> =
+        LinkedHashMap(effective).apply { stored.forEach { (k, v) -> if (k !in this) put(k, v) } }
+
     private fun hitRate(c: FamilyCounts): Double? = if (c.calls > 0) c.hits.sum() * 100.0 / c.calls else null
 
     private fun rate(n: Long, seconds: Double): Double = if (seconds > 0) n / seconds else 0.0
 
     private fun num(x: Double?): Any = if (x == null || x.isNaN() || x.isInfinite()) JSONObject.NULL else Math.round(x * 10) / 10.0
 
+    /** Thermal headroom: 1.0 is throttling, so two places. */
+    private fun num2(x: Double?): Any = if (x == null || x.isNaN() || x.isInfinite()) JSONObject.NULL else Math.round(x * 100) / 100.0
+
     private fun fmt0(x: Double) = String.format(Locale.US, "%.0f", x)
     private fun fmt1(x: Double) = String.format(Locale.US, "%.1f", x)
+    private fun fmt2(x: Double) = String.format(Locale.US, "%.2f", x)
+    private fun watts(mw: Double?) = mw?.let { "${fmt1(it / 1000)} W" } ?: "-"
 
     /** 950, 12.3k, 4.5M: counts in a column. */
     private fun count(x: Double): String = when {

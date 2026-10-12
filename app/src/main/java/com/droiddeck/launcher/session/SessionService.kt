@@ -381,8 +381,12 @@ class SessionService : Service() {
             guest.add("DXVK_HDR=1")
             Log.i(TAG, "hdr: gamescope --hdr-enabled, DXVK_HDR=1")
         }
-        guest.add("BL_FPS=" + SessionState.fpsLimit)
-        guest.add("BL_REFRESH=" + Math.round(SessionState.refreshHz))
+        val fpsLimit = SessionState.fpsLimit
+        val refreshHz = Math.round(SessionState.refreshHz)
+        guest.add("BL_FPS=$fpsLimit")
+        guest.add("BL_REFRESH=$refreshHz")
+        // The report's frame times are measured against the same pace.
+        perf?.frameTarget(fpsLimit, refreshHz)
         guest.add("BL_LOG=" + sessionLog.path)
         guest.add("BL_DEBUG_DIR=" + sessionDir.path)
 

@@ -42,6 +42,12 @@ object SessionPrefs {
 
     private fun prefs(context: Context) = context.getSharedPreferences("session", Context.MODE_PRIVATE)
 
+    /** What is stored under [keys], as stored and in their order, for the performance report; a key never set is left out. */
+    fun stored(context: Context, keys: List<String>): Map<String, Any?> {
+        val all = prefs(context).all
+        return keys.filter { it in all }.associateWithTo(LinkedHashMap()) { all[it] }
+    }
+
     val orientationOptions = listOf(
         ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE to R.string.setup_orientation_auto,
         ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE to R.string.setup_orientation_landscape,

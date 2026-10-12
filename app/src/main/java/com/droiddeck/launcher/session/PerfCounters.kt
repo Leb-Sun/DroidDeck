@@ -8,19 +8,26 @@ data class SyscallStops(val enter: Long, val exit: Long, val emulated: Long, val
     val stops: Long get() = enter + exit + emulated
 }
 
-/** One read of proot's stop counter file. [kinds] and [kindNs] follow [PerfCounters.STOP_KINDS]. */
+/**
+ * One read of proot's stop counter file. [kinds] and [kindNs] follow [PerfCounters.STOP_KINDS];
+ * [pid] is the tracer's, from the file's header.
+ */
 class ProotStops(
     val stops: Long,
     val ns: Long,
     val kinds: LongArray,
     val kindNs: LongArray,
     val syscalls: Map<String, SyscallStops>,
+    val pid: Int = 0,
 ) {
     fun kind(name: String): Long = kinds.getOrElse(PerfCounters.STOP_KINDS.indexOf(name)) { 0L }
 }
 
 /** One process's fast-path counter file: hits and misses by [PerfCounters.FAMILIES]. */
 class FastPathFile(val name: String, val pid: Int, val hits: LongArray, val misses: LongArray)
+
+/** The fields of /proc/<pid>/status the report uses: the real uid, the parent, the tracer (0: none), VmRSS. */
+data class ProcStatus(val uid: Int, val ppid: Int, val tracerPid: Int, val rssKb: Long)
 
 /** The fields of /proc/<pid>/stat the report uses; times in clock ticks. */
 data class ProcStat(
@@ -47,6 +54,9 @@ object PerfCounters {
 
     private const val KINDS_MAX = 16
     private const val FAST_PATH_HEADER = 56
+    /** Enough of a stop counter file's header for its tracer's pid. */
+    const val STATS_PID_BYTES = 40
+    private val TRACER_FILE = Regex("""proot-([a-z]+)-[A-Za-z0-9_.-]+\.stats""")
 
     fun parseStops(bytes: ByteArray): ProotStops? {
         if (bytes.size < 72 + 2 * 8 * KINDS_MAX || !bytes.startsWith("PRSTATS\u0000")) return null
@@ -69,7 +79,24 @@ object PerfCounters {
             val name = cString(bytes, (namesAt + nameSize.toLong() * i).toInt(), nameSize).ifEmpty { "#$i" }
             syscalls[name] = row
         }
-        return ProotStops(b.getLong(56), b.getLong(64), kinds, kindNs, syscalls)
+        return ProotStops(b.getLong(56), b.getLong(64), kinds, kindNs, syscalls, b.getLong(32).toInt())
+    }
+
+    /** The tracer's pid from the first [STATS_PID_BYTES] of a stop counter file; null until it is filled in. */
+    fun statsPid(header: ByteArray): Int? {
+        if (header.size < STATS_PID_BYTES || !header.startsWith("PRSTATS\u0000")) return null
+        val b = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)
+        if (b.getInt(8) != 1) return null
+        return b.getLong(32).toInt().takeIf { it > 0 }
+    }
+
+    /**
+     * A tracer's role from its counter file's name: `proot.stats` is the session's proot, and
+     * `proot-<role>-<n>.stats` another's (03-design.md §6.1: game, net). Null: not a counter file.
+     */
+    fun tracerRole(fileName: String): String? = when (fileName) {
+        "proot.stats" -> "session"
+        else -> TRACER_FILE.matchEntire(fileName)?.groupValues?.get(1)
     }
 
     fun parseFastPath(bytes: ByteArray): FastPathFile? {
@@ -100,6 +127,76 @@ object PerfCounters {
             cutime = f[13].toLongOrNull() ?: return null,
             cstime = f[14].toLongOrNull() ?: return null,
         )
+    }
+
+    /** /proc/<pid>/status; null without the lines every process has. A kernel thread has no VmRSS: 0. */
+    fun parseStatus(text: String): ProcStatus? {
+        var uid: Int? = null
+        var ppid: Int? = null
+        var tracer: Int? = null
+        var rss = 0L
+        for (line in text.lineSequence()) {
+            val value = line.substringAfter(':', "").trim()
+            when (line.substringBefore(':')) {
+                "Uid" -> uid = value.substringBefore('\t').substringBefore(' ').toIntOrNull()
+                "PPid" -> ppid = value.toIntOrNull()
+                "TracerPid" -> tracer = value.toIntOrNull()
+                "VmRSS" -> rss = value.substringBefore(' ').toLongOrNull() ?: 0L
+            }
+        }
+        return ProcStatus(uid ?: return null, ppid ?: return null, tracer ?: return null, rss)
+    }
+
+    /**
+     * Whether a command line is one of the app's own processes: zygote names them after the package,
+     * or `<package>:<name>`. Every other process of the uid is a phantom, the processes Android's
+     * phantom process limit counts (PhantomProcessList); the caller also makes sure the parent is
+     * not one of the uid's, since a child forked from the app keeps its name until it execs.
+     */
+    fun isAppProcess(cmdline: ByteArray, packageName: String): Boolean {
+        val name = String(cmdline, Charsets.UTF_8).substringBefore('\u0000')
+        return name == packageName || name.startsWith("$packageName:")
+    }
+
+    /**
+     * /etc/droiddeck/glibc-state in the rootfs, `<state> <pkgver>` (03-design.md §4.2: patched, stock
+     * or mismatch); without the file, the rootfs's own glibc: stock.
+     */
+    fun glibcState(text: String?): Map<String, Any?> {
+        val words = text?.trim()?.lineSequence()?.firstOrNull()?.trim()?.split(Regex("\\s+")).orEmpty().filter { it.isNotEmpty() }
+        if (words.isEmpty()) return linkedMapOf("state" to "stock")
+        return linkedMapOf("state" to words[0], "pkgver" to words.getOrNull(1))
+    }
+
+    /**
+     * Battery power in mW from BatteryManager's CURRENT_NOW and the sticky ACTION_BATTERY_CHANGED's
+     * EXTRA_VOLTAGE, read as OEMs report them rather than as documented:
+     * - current is µA by the documentation and mA on some devices: a magnitude under 10,000 is read
+     *   as mA, since a running session draws far more than 10 mA and no phone 10 A;
+     * - voltage is mV, and V or µV on some: under 100 is V, over 100,000 µV;
+     * - the sign is dropped: negative while discharging is AOSP's convention, which some OEMs invert.
+     * Unplugged, that is the device's draw; plugged in, the battery's net flow. Null: no reading
+     * (Long.MIN_VALUE is BatteryManager's "unsupported").
+     */
+    fun powerMw(currentRaw: Long, voltageRaw: Int): Double? {
+        if (currentRaw == Long.MIN_VALUE || voltageRaw <= 0) return null
+        val milliamps = Math.abs(currentRaw.toDouble()).let { if (currentUnit(currentRaw) == "mA") it else it / 1000 }
+        val volts = when (voltageUnit(voltageRaw)) {
+            "V" -> voltageRaw.toDouble()
+            "uV" -> voltageRaw / 1e6
+            else -> voltageRaw / 1000.0
+        }
+        return milliamps * volts
+    }
+
+    /** The unit [powerMw] reads a CURRENT_NOW value in. */
+    fun currentUnit(currentRaw: Long): String = if (Math.abs(currentRaw) < 10_000) "mA" else "uA"
+
+    /** The unit [powerMw] reads an EXTRA_VOLTAGE value in. */
+    fun voltageUnit(voltageRaw: Int): String = when {
+        voltageRaw < 100 -> "V"
+        voltageRaw > 100_000 -> "uV"
+        else -> "mV"
     }
 
     /** "SteamLaunch AppId=<n>" in a NUL-separated command line: the Steam client's reaper for a game. */

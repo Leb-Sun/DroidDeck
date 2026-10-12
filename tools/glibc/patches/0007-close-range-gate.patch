@@ -1,0 +1,143 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DroidDeck <droiddeck@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 00:00:00 +0000
+Subject: [PATCH] linux: close_range answers ENOSYS when BL_NATIVE_BLOCK marks
+ it blocked
+
+Android 12's filter traps close_range, and closefrom and posix_spawn's
+closefrom action both issue it. Bit 0x8 of BL_NATIVE_BLOCK (set by the app's
+probe when the filter traps the call, and part of the unset default) makes
+close_range fail with ENOSYS without the syscall, as on a kernel older
+than 5.9, and posix_spawn's direct call does the same. Both then use
+glibc's own fallback, __closefrom_fallback, which closes what
+/proc/self/fd lists; programs that call close_range themselves (CPython,
+GLib) treat ENOSYS the same way. glibc's generic close loop is not used: it
+would close every number up to RLIMIT_NOFILE, which Steam raises to the
+hard limit.
+---
+ sysdeps/unix/sysv/linux/bl-seccomp.h  | 19 ++++++-----
+ sysdeps/unix/sysv/linux/close_range.c | 45 +++++++++++++++++++++++++++
+ sysdeps/unix/sysv/linux/spawni.c      |  6 +++-
+ sysdeps/unix/sysv/linux/syscalls.list |  3 +-
+ 4 files changed, 63 insertions(+), 10 deletions(-)
+ create mode 100644 sysdeps/unix/sysv/linux/close_range.c
+
+diff --git a/sysdeps/unix/sysv/linux/bl-seccomp.h b/sysdeps/unix/sysv/linux/bl-seccomp.h
+index 5905a3de..eb91648e 100644
+--- a/sysdeps/unix/sysv/linux/bl-seccomp.h
++++ b/sysdeps/unix/sysv/linux/bl-seccomp.h
+@@ -2,16 +2,17 @@
+ 
+    Android's app seccomp policy answers a fixed set of syscalls with SIGSYS.
+    Without a tracer that SIGSYS kills the process.  A few of the blocked
+-   syscalls are *version dependent* (clone3 before Android 15; faccessat2,
+-   fchmodat2 before Android 16 QPR1), so glibc cannot decide statically
+-   whether issuing them is safe.  The app knows the device's Android version
+-   (and runs a forked-child seccomp probe at session start, 02 S9.1), so it
+-   passes the result in the environment.
++   syscalls are *version dependent* (close_range on Android 12, clone3
++   before Android 15; faccessat2, fchmodat2 before Android 16 QPR1), so
++   glibc cannot decide statically whether issuing them is safe.  The app
++   knows the device's Android version (and runs a forked-child seccomp probe
++   at session start, 02 S9.1), so it passes the result in the environment.
+ 
+    BL_NATIVE_BLOCK is a hex mask of syscalls that MUST NOT be issued because
+    this device's filter traps them.  When unset the mask defaults to
+-   BL_BLK_DEFAULT (all version-gated syscalls assumed blocked = the Android 14
+-   worst case), which is always safe: glibc just uses the portable fallback.
++   BL_BLK_DEFAULT (every version-gated syscall assumed blocked, more than any
++   one release's filter), which is always safe: glibc just uses the portable
++   fallback.
+ 
+    rseq and set_robust_list are blocked on *every* Android 10-17, so they are
+    skipped unconditionally elsewhere and are not represented here.
+@@ -25,7 +26,9 @@
+ #define BL_BLK_CLONE3     0x1
+ #define BL_BLK_FACCESSAT2 0x2
+ #define BL_BLK_FCHMODAT2  0x4
+-#define BL_BLK_DEFAULT    (BL_BLK_CLONE3 | BL_BLK_FACCESSAT2 | BL_BLK_FCHMODAT2)
++#define BL_BLK_CLOSE_RANGE 0x8
++#define BL_BLK_DEFAULT    (BL_BLK_CLONE3 | BL_BLK_FACCESSAT2 | BL_BLK_FCHMODAT2 \
++			   | BL_BLK_CLOSE_RANGE)
+ 
+ /* The cached mask, defined in bl-seccomp.c.  Filled by an ELF constructor and,
+    defensively, lazily on first query.  Before either runs it reads as
+diff --git a/sysdeps/unix/sysv/linux/close_range.c b/sysdeps/unix/sysv/linux/close_range.c
+new file mode 100644
+index 00000000..e35e1992
+--- /dev/null
++++ b/sysdeps/unix/sysv/linux/close_range.c
+@@ -0,0 +1,45 @@
++/* Close a range of file descriptors.  Linux version.
++   Copyright (C) 2021-2026 Free Software Foundation, Inc.
++   This file is part of the GNU C Library.
++
++   The GNU C Library is free software; you can redistribute it and/or
++   modify it under the terms of the GNU Lesser General Public
++   License as published by the Free Software Foundation; either
++   version 2.1 of the License, or (at your option) any later version.
++
++   The GNU C Library is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++   Lesser General Public License for more details.
++
++   You should have received a copy of the GNU Lesser General Public
++   License along with the GNU C Library; if not, see
++   <https://www.gnu.org/licenses/>.  */
++
++/* DroidDeck native mode: Android 12's app seccomp policy answers close_range
++   with SIGSYS, and with no tracer that kills the process.  This replaces the
++   stub syscalls.list used to generate.  When the app marks the call blocked
++   (BL_NATIVE_BLOCK bit 0x8, see bl-seccomp.h), answer ENOSYS without issuing
++   it, as a kernel older than 5.9 would: closefrom then takes glibc's own
++   fallback (__closefrom_fallback, which closes what /proc/self/fd lists), and
++   programs that call close_range themselves fall back the same way.  The
++   generic close loop in io/close_range.c is not used: it would close every
++   number up to RLIMIT_NOFILE.  */
++
++#include <errno.h>
++#include <unistd.h>
++#include <sysdep.h>
++#include <bl-seccomp.h>
++
++int
++__close_range (unsigned int first, unsigned int last, int flags)
++{
++  if (__bl_blocked (BL_BLK_CLOSE_RANGE))
++    {
++      __set_errno (ENOSYS);
++      return -1;
++    }
++  return INLINE_SYSCALL_CALL (close_range, first, last, flags);
++}
++libc_hidden_def (__close_range)
++weak_alias (__close_range, close_range)
+diff --git a/sysdeps/unix/sysv/linux/spawni.c b/sysdeps/unix/sysv/linux/spawni.c
+index 46b8045f..939b598a 100644
+--- a/sysdeps/unix/sysv/linux/spawni.c
++++ b/sysdeps/unix/sysv/linux/spawni.c
+@@ -266,7 +266,11 @@ __spawni_child (void *arguments)
+ 	    case spawn_do_closefrom:
+ 	      {
+ 		int lowfd = action->action.closefrom_action.from;
+-	        int r = INLINE_SYSCALL_CALL (close_range, lowfd, ~0U, 0);
++		/* DroidDeck native mode: close_range is SIGSYS-blocked on
++		   Android 12.  When the app marks it blocked, go straight to the
++		   /proc/self/fd fallback, as on a kernel without close_range.  */
++	        int r = __bl_blocked (BL_BLK_CLOSE_RANGE)
++			? -1 : INLINE_SYSCALL_CALL (close_range, lowfd, ~0U, 0);
+ 		if (r != 0 && !__closefrom_fallback (lowfd, false))
+ 		  goto fail;
+ 	      } break;
+diff --git a/sysdeps/unix/sysv/linux/syscalls.list b/sysdeps/unix/sysv/linux/syscalls.list
+index 43648d53..695c88e8 100644
+--- a/sysdeps/unix/sysv/linux/syscalls.list
++++ b/sysdeps/unix/sysv/linux/syscalls.list
+@@ -107,4 +107,5 @@ pkey_alloc	EXTRA	pkey_alloc	i:ii	__pkey_alloc	pkey_alloc
+ pkey_free	EXTRA	pkey_free	i:i	__pkey_free	pkey_free
+ gettid          EXTRA   gettid          Ei:     __gettid	gettid
+ tgkill          EXTRA   tgkill          i:iii   __tgkill	tgkill
+-close_range     -       close_range     i:iii   __close_range   close_range
++# DroidDeck native mode: close_range is provided by our own close_range.c
++# (gated on BL_NATIVE_BLOCK); no auto stub.

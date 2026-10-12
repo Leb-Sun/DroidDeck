@@ -1,0 +1,107 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DroidDeck <droiddeck@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 00:00:00 +0000
+Subject: [PATCH] nptl: never issue rseq or set_robust_list
+
+Android blocks both on every release from 10 to 17, and ld.so issues them
+while it sets up the main thread's TLS, before any preload exists: a stock
+glibc dies there with SIGSYS when no tracer is attached. They are skipped at
+all three sites: ld.so's TLS set-up, every new thread, and every fork child,
+where glibc issues set_robust_list unconditionally because
+__ASSUME_SET_ROBUST_LIST holds for the minimum kernel. The robust list
+stays linked in userspace; only the kernel's owner-death cleanup of robust
+mutexes is lost. With no rseq area registered, sched_getcpu uses getcpu.
+---
+ nptl/pthread_create.c         |  9 +++++++--
+ sysdeps/nptl/_Fork.c          |  7 +++++--
+ sysdeps/nptl/dl-tls_init_tp.c | 27 ++++++++++++++-------------
+ 3 files changed, 26 insertions(+), 17 deletions(-)
+
+diff --git a/nptl/pthread_create.c b/nptl/pthread_create.c
+index 6e7e0c64..a18993dd 100644
+--- a/nptl/pthread_create.c
++++ b/nptl/pthread_create.c
+@@ -386,15 +386,20 @@ start_thread (void *arg)
+       __libc_fatal ("Fatal glibc error: rseq registration failed\n");
+   }
+ 
++  /* DroidDeck native mode: never issue set_robust_list in a new thread.
++     Android SIGSYS-blocks it on every release, and __ASSUME_SET_ROBUST_LIST is
++     defined for our minimum kernel, so the original unconditional call would
++     kill every thread with no tracer.  The robust_head is still linked for
++     userspace; only kernel-side owner-death cleanup is lost.  */
++#if 0
+ #ifndef __ASSUME_SET_ROBUST_LIST
+   if (__nptl_set_robust_list_avail)
+ #endif
+     {
+-      /* This call should never fail because the initial call in init.c
+-	 succeeded.  */
+       INTERNAL_SYSCALL_CALL (set_robust_list, &pd->robust_head,
+ 			     sizeof (struct robust_list_head));
+     }
++#endif
+ 
+   /* This is where the try/finally block should be created.  For
+      compilers without that support we do use setjmp.  */
+diff --git a/sysdeps/nptl/_Fork.c b/sysdeps/nptl/_Fork.c
+index 907b3fef..d40df302 100644
+--- a/sysdeps/nptl/_Fork.c
++++ b/sysdeps/nptl/_Fork.c
+@@ -49,8 +49,11 @@ _Fork (void)
+       self->robust_prev = &self->robust_head;
+ #endif
+       self->robust_head.list = &self->robust_head;
+-      INTERNAL_SYSCALL_CALL (set_robust_list, &self->robust_head,
+-			     sizeof (struct robust_list_head));
++      /* DroidDeck native mode: Android SIGSYS-blocks set_robust_list on
++	 every release.  __ASSUME_SET_ROBUST_LIST is defined for our minimum
++	 kernel, so glibc would issue it unconditionally in the fork child and
++	 die with no tracer.  The userspace list is still reset above; only the
++	 kernel-side owner-death cleanup is lost.  */
+       call_function_static_weak (__getrandom_fork_subprocess);
+     }
+ 
+diff --git a/sysdeps/nptl/dl-tls_init_tp.c b/sysdeps/nptl/dl-tls_init_tp.c
+index 72cc4087..9d509dd9 100644
+--- a/sysdeps/nptl/dl-tls_init_tp.c
++++ b/sysdeps/nptl/dl-tls_init_tp.c
+@@ -92,24 +92,25 @@ __tls_init_tp (void)
+     pd->robust_head.futex_offset = (offsetof (pthread_mutex_t, __data.__lock)
+                                     - offsetof (pthread_mutex_t,
+                                                 __data.__list.__next));
+-    int res = INTERNAL_SYSCALL_CALL (set_robust_list, &pd->robust_head,
+-                                     sizeof (struct robust_list_head));
+-    if (!INTERNAL_SYSCALL_ERROR_P (res))
+-      {
++    /* DroidDeck native mode: Android's app seccomp policy answers
++       set_robust_list with SIGSYS on every release (10-17).  With no tracer
++       that SIGSYS kills the process here, at ld.so TLS setup, before any
++       preload exists (01 S0).  Never issue the syscall; leave
++       __nptl_set_robust_list_avail false so new threads skip it too.  The
++       robust_head is still linked for userspace; only the kernel-side
++       owner-death cleanup is lost.  (Termux glibc deletes the same call.)  */
+ #ifndef __ASSUME_SET_ROBUST_LIST
+-        __nptl_set_robust_list_avail = true;
++    __nptl_set_robust_list_avail = false;
+ #endif
+-      }
+   }
+ 
+   {
+-    /* If the registration fails or is disabled by tunable, the public
+-       '__rseq_size' will be set to '0' regardless of the feature size of the
+-       allocated rseq area.  An rseq area of at least 32 bytes is always
+-       allocated since application code is allowed to check the status of the
+-       rseq registration by reading the content of the 'cpu_id' field.  */
+-    bool do_rseq = TUNABLE_GET (rseq, int, NULL);
+-    if (!rseq_register_current_thread (pd, do_rseq))
++    /* DroidDeck native mode: rseq is also answered with SIGSYS by
++       Android on every release.  Pass do_rseq = false unconditionally so
++       rseq_register_current_thread sets cpu_id to REGISTRATION_FAILED and
++       returns without issuing the syscall, independent of GLIBC_TUNABLES.
++       sched_getcpu() then uses its getcpu() fallback.  */
++    if (!rseq_register_current_thread (pd, false))
+       _rseq_size = 0;
+   }
+ 

@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DroidDeck <droiddeck@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 00:00:00 +0000
+Subject: [PATCH] linux: clone3 falls back to clone when BL_NATIVE_BLOCK marks
+ it blocked
+
+Before Android 15 the filter traps clone3, and pthread_create issues it with
+every signal blocked, so no in-process SIGSYS handler could catch it. With
+bit 0x1 set, __clone3_internal behaves as if clone3 had already returned
+ENOSYS and takes the clone fallback, and posix_spawn, which calls __clone3
+directly, does the same. With the bit clear (Android 15 and later) glibc's
+own ENOSYS probe runs as before.
+---
+ sysdeps/unix/sysv/linux/clone-internal.c | 10 ++++++++++
+ sysdeps/unix/sysv/linux/spawni.c         | 16 +++++++++++++---
+ 2 files changed, 23 insertions(+), 3 deletions(-)
+
+diff --git a/sysdeps/unix/sysv/linux/clone-internal.c b/sysdeps/unix/sysv/linux/clone-internal.c
+index edb0a4b7..baf5e457 100644
+--- a/sysdeps/unix/sysv/linux/clone-internal.c
++++ b/sysdeps/unix/sysv/linux/clone-internal.c
+@@ -23,6 +23,7 @@
+ #include <clone_internal.h>
+ #include <libc-pointer-arith.h>	/* For cast_to_pointer.  */
+ #include <stackinfo.h>		/* For _STACK_GROWS_{UP,DOWN}.  */
++#include <bl-seccomp.h>		/* DroidDeck native mode.  */
+ 
+ #define CLONE_ARGS_SIZE_VER0 64 /* sizeof first published struct */
+ #define CLONE_ARGS_SIZE_VER1 80 /* sizeof second published struct */
+@@ -77,6 +78,15 @@ __clone3_internal (struct clone_args *cl_args, int (*func) (void *args),
+   return __clone3 (cl_args, sizeof (*cl_args), func, arg);
+ # else
+   static int clone3_supported = 1;
++  /* DroidDeck native mode: before Android 15 the app seccomp policy
++     answers clone3 with SIGSYS.  pthread_create issues this with every signal
++     blocked, so an in-process SIGSYS handler cannot catch it (01 P10); with no
++     tracer the whole process dies.  When the app marks clone3 blocked, pretend
++     it already returned ENOSYS so we drop straight to the clone() fallback and
++     never issue the syscall.  On Android 15+ the app clears the bit and the
++     normal ENOSYS probe (harmless, since it is allowed) runs instead.  */
++  if (__bl_blocked (BL_BLK_CLONE3))
++    atomic_store_relaxed (&clone3_supported, 0);
+   if (atomic_load_relaxed (&clone3_supported) == 1)
+     {
+       int ret = __clone3 (cl_args, sizeof (*cl_args), func, arg);
+diff --git a/sysdeps/unix/sysv/linux/spawni.c b/sysdeps/unix/sysv/linux/spawni.c
+index 3c0feeb0..46b8045f 100644
+--- a/sysdeps/unix/sysv/linux/spawni.c
++++ b/sysdeps/unix/sysv/linux/spawni.c
+@@ -25,6 +25,7 @@
+ #include <spawn.h>
+ #include <spawn_int.h>
+ #include <sysdep.h>
++#include <bl-seccomp.h>		/* DroidDeck native mode.  */
+ #include <sys/resource.h>
+ #include <clone_internal.h>
+ 
+@@ -414,9 +415,18 @@ __spawnix (int *pid, const char *file,
+       .parent_tid = use_pidfd ? (uintptr_t) &args.pidfd : 0,
+     };
+ #ifdef HAVE_CLONE3_WRAPPER
+-  args.use_clone3 = true;
+-  new_pid = __clone3 (&clone_args, sizeof (clone_args), __spawni_child,
+-		      &args);
++  /* DroidDeck native mode: posix_spawn calls __clone3 directly here,
++     bypassing __clone3_internal's gate, so gate it too.  Before Android 15
++     clone3 is SIGSYS-blocked and would kill the spawning process; pretend it
++     returned ENOSYS so the __clone_internal_fallback (plain clone) path runs.
++     (CLONE_CLEAR_SIGHAND is lost, but __spawni_child already resets handlers
++     when !use_clone3 -- see the SIG_DFL/SIG_IGN loop above.)  */
++  args.use_clone3 = !__bl_blocked (BL_BLK_CLONE3);
++  if (args.use_clone3)
++    new_pid = __clone3 (&clone_args, sizeof (clone_args), __spawni_child,
++			&args);
++  else
++    { new_pid = -1; errno = ENOSYS; }
+   /* clone3 was added in 5.3 and CLONE_CLEAR_SIGHAND in 5.5.  */
+   if (new_pid == -1 && (errno == ENOSYS || errno == EINVAL))
+ #endif

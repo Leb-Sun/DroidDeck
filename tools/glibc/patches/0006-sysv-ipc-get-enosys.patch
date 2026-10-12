@@ -1,0 +1,85 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DroidDeck <droiddeck@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 00:00:00 +0000
+Subject: [PATCH] sysvipc: shmget, semget and msgget answer ENOSYS
+
+Android traps SysV shared memory, semaphores and message queues on every
+release, and GKI kernels are built without CONFIG_SYSVIPC, so no SysV id can
+exist. The three *get calls refuse with ENOSYS, and with no valid id the
+remaining calls are never reached. In a DroidDeck session the preload
+(libblsession's sysv.c) interposes all three ahead of libc with its
+file-backed objects, so Steam's semaphore and mangoapp's queue are still
+answered there.
+---
+ sysdeps/unix/sysv/linux/msgget.c |  9 ++++-----
+ sysdeps/unix/sysv/linux/semget.c |  9 ++++-----
+ sysdeps/unix/sysv/linux/shmget.c | 15 ++++++++++-----
+ 3 files changed, 18 insertions(+), 15 deletions(-)
+
+diff --git a/sysdeps/unix/sysv/linux/msgget.c b/sysdeps/unix/sysv/linux/msgget.c
+index b6f1feac..c9bd08fa 100644
+--- a/sysdeps/unix/sysv/linux/msgget.c
++++ b/sysdeps/unix/sysv/linux/msgget.c
+@@ -25,9 +25,8 @@
+ int
+ msgget (key_t key, int msgflg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (msgget, key, msgflg);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_msgget, key, msgflg, 0, NULL);
+-#endif
++  /* DroidDeck native mode: see shmget.c.  */
++  (void) key; (void) msgflg;
++  __set_errno (ENOSYS);
++  return -1;
+ }
+diff --git a/sysdeps/unix/sysv/linux/semget.c b/sysdeps/unix/sysv/linux/semget.c
+index e0d73ddc..dce99f3c 100644
+--- a/sysdeps/unix/sysv/linux/semget.c
++++ b/sysdeps/unix/sysv/linux/semget.c
+@@ -26,9 +26,8 @@
+ int
+ semget (key_t key, int nsems, int semflg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (semget, key, nsems, semflg);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_semget, key, nsems, semflg, NULL);
+-#endif
++  /* DroidDeck native mode: see shmget.c.  */
++  (void) key; (void) nsems; (void) semflg;
++  __set_errno (ENOSYS);
++  return -1;
+ }
+diff --git a/sysdeps/unix/sysv/linux/shmget.c b/sysdeps/unix/sysv/linux/shmget.c
+index 8b6dccc3..38eb5f8f 100644
+--- a/sysdeps/unix/sysv/linux/shmget.c
++++ b/sysdeps/unix/sysv/linux/shmget.c
+@@ -17,6 +17,7 @@
+ 
+ #include <sys/msg.h>
+ #include <stddef.h>
++#include <errno.h>
+ #include <ipc_priv.h>
+ #include <sysdep.h>
+ 
+@@ -26,9 +27,13 @@
+ int
+ shmget (key_t key, size_t size, int shmflg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (shmget, key, size, shmflg, NULL);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_shmget, key, size, shmflg, NULL);
+-#endif
++  /* DroidDeck native mode: SysV shm/sem/msg are SIGSYS-blocked by
++     Android on every release and CONFIG_SYSVIPC is off in GKI, so no SysV id
++     can exist.  Refuse at the gateway with ENOSYS (upstream Termux glibc does
++     the same; steamclienttermux adds a same-UID broker where Steam needs real
++     semaphores -- see 04 S5).  With no valid id the shmat/shmctl paths are
++     unreachable, so the blocked syscalls are never issued.  */
++  (void) key; (void) size; (void) shmflg;
++  __set_errno (ENOSYS);
++  return -1;
+ }

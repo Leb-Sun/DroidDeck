@@ -136,3 +136,4 @@ decides which layer goes first, and what "faster" means in numbers.
 - `harness.md`: how to take a baseline on the device, and what the report measures (Phase 1).
 - `03-design.md`: the layered design and the milestones M0–M17 (Phase 2).
 - `04-spikes.md`, `tools/native/`: the feasibility spike for layers 3 and 4, and its prototype (Phase 2).
+- `m9-spawnserver.md`: what M9 moved into `SpawnServer`, and its wire format (Phase 3).

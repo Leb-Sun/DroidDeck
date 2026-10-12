@@ -1,0 +1,141 @@
+# DroidDeck native-mode spike glibc patch: runtime gate + setfs overrides
+# Against upstream glibc 2.43.  Adds the BL_NATIVE_BLOCK runtime gate used
+# by the clone3/faccessat2/fchmodat2 patches, plus setfsuid/setfsgid overrides
+# and the Makefile/syscalls wiring.  Apply first.  Spike code (Gate 2).
+
+--- /dev/null	2026-10-09 17:57:05.831737252 +0000
++++ b/sysdeps/unix/sysv/linux/bl-seccomp.h	2026-10-12 01:00:02.868819306 +0000
+@@ -0,0 +1,49 @@
++/* DroidDeck native-mode spike: runtime gate for Android-blocked syscalls.
++
++   Android's app seccomp policy answers a fixed set of syscalls with SIGSYS.
++   Without a tracer that SIGSYS kills the process.  A few of the blocked
++   syscalls are *version dependent* (clone3 before Android 15; faccessat2,
++   fchmodat2 before Android 16 QPR1), so glibc cannot decide statically
++   whether issuing them is safe.  The app knows the device's Android version
++   (and runs a forked-child seccomp probe at session start, 02 S9.1), so it
++   passes the result in the environment.
++
++   BL_NATIVE_BLOCK is a hex mask of syscalls that MUST NOT be issued because
++   this device's filter traps them.  When unset the mask defaults to
++   BL_BLK_DEFAULT (all version-gated syscalls assumed blocked = the Android 14
++   worst case), which is always safe: glibc just uses the portable fallback.
++
++   rseq and set_robust_list are blocked on *every* Android 10-17, so they are
++   skipped unconditionally elsewhere and are not represented here.
++
++   This is spike code.  Not wired into the shipping rootfs or the app.  */
++
++#ifndef _BL_SECCOMP_H
++#define _BL_SECCOMP_H 1
++
++#define BL_BLK_CLONE3     0x1
++#define BL_BLK_FACCESSAT2 0x2
++#define BL_BLK_FCHMODAT2  0x4
++#define BL_BLK_DEFAULT    (BL_BLK_CLONE3 | BL_BLK_FACCESSAT2 | BL_BLK_FCHMODAT2)
++
++/* The cached mask, defined in bl-seccomp.c.  Filled by an ELF constructor and,
++   defensively, lazily on first query.  Before either runs it reads as
++   BL_BLK_DEFAULT (the -1 sentinel maps to the safe default), so a very early
++   caller never issues a version-gated syscall.  */
++extern int __bl_block_mask_cache attribute_hidden;
++
++extern void __bl_block_mask_init (void) attribute_hidden;
++
++static inline int
++__bl_blocked (int bit)
++{
++  int m = __bl_block_mask_cache;
++  if (__glibc_unlikely (m < 0))
++    {
++      __bl_block_mask_init ();
++      m = __bl_block_mask_cache;
++    }
++  return (m & bit) != 0;
++}
++
++#endif /* bl-seccomp.h */
+--- /dev/null	2026-10-09 17:57:05.831737252 +0000
++++ b/sysdeps/unix/sysv/linux/bl-seccomp.c	2026-10-12 01:00:10.636819112 +0000
+@@ -0,0 +1,34 @@
++/* DroidDeck native-mode spike: runtime gate for Android-blocked syscalls.
++   See bl-seccomp.h.  Spike code; not for the shipping rootfs.  */
++
++#include <bl-seccomp.h>
++#include <stdlib.h>
++
++/* -1 => not initialised yet; __bl_blocked() then takes the safe default.  */
++int __bl_block_mask_cache = -1;
++
++void
++__bl_block_mask_init (void)
++{
++  int m = BL_BLK_DEFAULT;
++  const char *s = getenv ("BL_NATIVE_BLOCK");
++  if (s != NULL && *s != '\0')
++    {
++      /* Hex mask; "0" explicitly means "nothing blocked" (Android 16 QPR1+
++         with clone3/faccessat2/fchmodat2 all allowed).  */
++      char *end;
++      long v = strtol (s, &end, 16);
++      if (end != s)
++	m = (int) v;
++    }
++  __bl_block_mask_cache = m;
++}
++
++/* Fill the cache before user main() where possible.  A late constructor is
++   fine: the version-gated syscalls (clone3 at the first pthread_create,
++   faccessat2/fchmodat2 at the first such call) are all issued after ctors.  */
++static void __attribute__ ((constructor))
++__bl_block_mask_ctor (void)
++{
++  __bl_block_mask_init ();
++}
+--- /dev/null	2026-10-09 17:57:05.831737252 +0000
++++ b/sysdeps/unix/sysv/linux/setfsuid.c	2026-10-12 01:03:35.372814003 +0000
+@@ -0,0 +1,19 @@
++/* DroidDeck native-mode spike: setfsuid without the blocked syscall.
++
++   Android's app seccomp policy SIGSYS-blocks setfsuid/setfsuid32 and offers no
++   replacement.  The fsuid always tracks the effective uid for a non-root app
++   that cannot change it, and setfsuid(2) never fails: it returns the previous
++   fsuid.  Return the current effective uid without issuing the syscall.
++
++   This overrides the stub that syscalls.list would otherwise generate.
++   Spike code; not for the shipping rootfs.  */
++
++#include <sys/fsuid.h>
++#include <unistd.h>
++
++int
++setfsuid (uid_t uid)
++{
++  (void) uid;
++  return (int) __geteuid ();
++}
+--- /dev/null	2026-10-09 17:57:05.831737252 +0000
++++ b/sysdeps/unix/sysv/linux/setfsgid.c	2026-10-12 01:03:38.400813927 +0000
+@@ -0,0 +1,12 @@
++/* DroidDeck native-mode spike: setfsgid without the blocked syscall.
++   See setfsuid.c.  Spike code; not for the shipping rootfs.  */
++
++#include <sys/fsuid.h>
++#include <unistd.h>
++
++int
++setfsgid (gid_t gid)
++{
++  (void) gid;
++  return (int) __getegid ();
++}
+--- a/sysdeps/unix/sysv/linux/Makefile	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/unix/sysv/linux/Makefile	2026-10-12 01:00:34.316818521 +0000
+@@ -59,6 +59,7 @@
+ ifeq ($(subdir),misc)
+ sysdep_routines += \
+   adjtimex \
++  bl-seccomp \
+   clock_adjtime \
+   clone \
+   clone-internal \

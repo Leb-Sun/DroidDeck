@@ -1,0 +1,116 @@
+# DroidDeck native-mode spike glibc patch: 0005-setid-family-mapped-to-setresuid-setresgid.patch
+# Against upstream glibc 2.43 (glibc_2.43.orig.tar.xz, sha256 d9c86c6b...).
+# Spike code; not for the shipping rootfs without review (Gate 2).
+
+--- a/sysdeps/unix/sysv/linux/setuid.c	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/unix/sysv/linux/setuid.c	2026-10-12 01:02:37.632815444 +0000
+@@ -22,11 +22,15 @@
+ int
+ __setuid (uid_t uid)
+ {
+-#ifdef __NR_setuid32
+-  return INLINE_SETXID_SYSCALL (setuid32, 1, uid);
+-#else
+-  return INLINE_SETXID_SYSCALL (setuid, 1, uid);
+-#endif
++  /* DroidDeck native-mode spike: Android's app seccomp policy SIGSYS-blocks
++     setuid/setuid32 but ALLOWS setresuid.  setuid(uid) sets real, effective
++     and (if privileged) saved uid to uid; setresuid(uid,uid,uid) is the same
++     for the privileged case and for the common DroidDeck case where uid is
++     the process's current (single) uid, which is a no-op success.  The only
++     divergence is an unprivileged setuid to the real/saved uid, which POSIX
++     lets touch only euid; that does not occur in the single-uid environment.
++     The setxid broadcast still runs, now issuing the allowed setresuid.  */
++  return INLINE_SETXID_SYSCALL (setresuid, 3, uid, uid, uid);
+ }
+ #ifndef __setuid
+ weak_alias (__setuid, setuid)
+--- a/sysdeps/unix/sysv/linux/setgid.c	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/unix/sysv/linux/setgid.c	2026-10-12 01:02:56.140814982 +0000
+@@ -23,11 +23,9 @@
+ int
+ __setgid (gid_t gid)
+ {
+-#ifdef __NR_setgid32
+-  return INLINE_SETXID_SYSCALL (setgid32, 1, gid);
+-#else
+-  return INLINE_SETXID_SYSCALL (setgid, 1, gid);
+-#endif
++  /* DroidDeck native-mode spike: setgid is SIGSYS-blocked, setresgid allowed.
++     Map setgid(gid) -> setresgid(gid,gid,gid); see setuid.c.  */
++  return INLINE_SETXID_SYSCALL (setresgid, 3, gid, gid, gid);
+ }
+ #ifndef __setgid
+ weak_alias (__setgid, setgid)
+--- a/sysdeps/unix/sysv/linux/setreuid.c	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/unix/sysv/linux/setreuid.c	2026-10-12 01:03:03.596814796 +0000
+@@ -23,11 +23,12 @@
+ int
+ __setreuid (uid_t ruid, uid_t euid)
+ {
+-#ifdef __NR_setreuid32
+-  return INLINE_SETXID_SYSCALL (setreuid32, 2, ruid, euid);
+-#else
+-  return INLINE_SETXID_SYSCALL (setreuid, 2, ruid, euid);
+-#endif
++  /* DroidDeck native-mode spike: setreuid is SIGSYS-blocked, setresuid allowed.
++     setresuid(ruid,euid,-1) leaves the saved uid alone, which matches
++     setreuid except in the corner case where setreuid would also move the
++     saved uid to the new euid (when ruid is set or euid != old ruid); that
++     does not matter in the single-uid environment.  */
++  return INLINE_SETXID_SYSCALL (setresuid, 3, ruid, euid, (uid_t) -1);
+ }
+ #ifndef __setreuid
+ weak_alias (__setreuid, setreuid)
+--- a/sysdeps/unix/sysv/linux/setregid.c	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/unix/sysv/linux/setregid.c	2026-10-12 01:03:10.032814635 +0000
+@@ -23,11 +23,9 @@
+ int
+ __setregid (gid_t rgid, gid_t egid)
+ {
+-#ifdef __NR_setregid32
+-  return INLINE_SETXID_SYSCALL (setregid32, 2, rgid, egid);
+-#else
+-  return INLINE_SETXID_SYSCALL (setregid, 2, rgid, egid);
+-#endif
++  /* DroidDeck native-mode spike: setregid is SIGSYS-blocked, setresgid
++     allowed.  Map to setresgid(rgid,egid,-1); see setreuid.c.  */
++  return INLINE_SETXID_SYSCALL (setresgid, 3, rgid, egid, (gid_t) -1);
+ }
+ #ifndef __setregid
+ weak_alias (__setregid, setregid)
+--- a/sysdeps/unix/sysv/linux/setgroups.c	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/unix/sysv/linux/setgroups.c	2026-10-12 01:03:30.408814127 +0000
+@@ -27,10 +27,14 @@
+ int
+ setgroups (size_t n, const gid_t *groups)
+ {
+-#ifdef __NR_setgroups32
+-  return INLINE_SETXID_SYSCALL (setgroups32, 2, n, groups);
+-#else
+-  return INLINE_SETXID_SYSCALL (setgroups, 2, n, groups);
+-#endif
++  /* DroidDeck native-mode spike: setgroups/setgroups32 are SIGSYS-blocked and
++     have no setres-style replacement.  A non-root app cannot change its
++     supplementary groups anyway, so report success without issuing the
++     syscall (as Termux glibc does).  Callers that drop groups before exec
++     (Xwayland) proceed; a caller that then reads the group list sees it
++     unchanged.  */
++  (void) n;
++  (void) groups;
++  return 0;
+ }
+ libc_hidden_def (setgroups)
+--- a/sysdeps/unix/sysv/linux/syscalls.list	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/unix/sysv/linux/syscalls.list	2026-10-12 01:20:19.036788956 +0000
+@@ -62,8 +62,8 @@
+ sched_setp	-	sched_setparam	i:ip	__sched_setparam	sched_setparam
+ sched_sets	-	sched_setscheduler	i:iip	__sched_setscheduler	sched_setscheduler
+ sched_yield	-	sched_yield	i:	__sched_yield	sched_yield
+-setfsgid	EXTRA	setfsgid	i:i	setfsgid
+-setfsuid	EXTRA	setfsuid	i:i	setfsuid
++# DroidDeck native-mode spike: setfsgid/setfsuid are provided by our own
++# setfsgid.c/setfsuid.c (the blocked syscall is never issued); no auto stub.
+ setpgid		-	setpgid		i:ii	__setpgid	setpgid
+ sigaltstack	-	sigaltstack	i:PP	__sigaltstack	sigaltstack
+ sysinfo		EXTRA	sysinfo		i:p	__sysinfo	sysinfo

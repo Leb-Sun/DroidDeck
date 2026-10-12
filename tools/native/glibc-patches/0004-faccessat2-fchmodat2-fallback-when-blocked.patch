@@ -1,0 +1,56 @@
+# DroidDeck native-mode spike glibc patch: 0004-faccessat2-fchmodat2-fallback-when-blocked.patch
+# Against upstream glibc 2.43 (glibc_2.43.orig.tar.xz, sha256 d9c86c6b...).
+# Spike code; not for the shipping rootfs without review (Gate 2).
+
+--- a/sysdeps/unix/sysv/linux/faccessat.c	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/unix/sysv/linux/faccessat.c	2026-10-12 01:01:36.020816981 +0000
+@@ -21,12 +21,25 @@
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include <sysdep.h>
++#include <bl-seccomp.h>		/* DroidDeck native-mode spike.  */
+ 
+ 
+ int
+ __faccessat (int fd, const char *file, int mode, int flag)
+ {
+-  int ret = INLINE_SYSCALL_CALL (faccessat2, fd, file, mode, flag);
++  /* DroidDeck native-mode spike: faccessat2 is SIGSYS-blocked before Android
++     16 QPR1.  When the app marks it blocked, behave exactly as if the kernel
++     returned ENOSYS (set errno and ret), so we take the portable fallback
++     below without ever issuing the syscall.  On 16 QPR1+ the bit is clear and
++     the fast single syscall runs.  */
++  int ret;
++  if (__bl_blocked (BL_BLK_FACCESSAT2))
++    {
++      __set_errno (ENOSYS);
++      ret = -1;
++    }
++  else
++    ret = INLINE_SYSCALL_CALL (faccessat2, fd, file, mode, flag);
+ #if __ASSUME_FACCESSAT2
+   return ret;
+ #else
+--- a/sysdeps/unix/sysv/linux/fchmodat.c	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/unix/sysv/linux/fchmodat.c	2026-10-12 01:02:15.116816005 +0000
+@@ -25,6 +25,7 @@
+ #include <sys/types.h>
+ #include <sysdep.h>
+ #include <unistd.h>
++#include <bl-seccomp.h>		/* DroidDeck native-mode spike.  */
+ 
+ #if !__ASSUME_FCHMODAT2
+ static int
+@@ -96,6 +97,12 @@
+   if (flag == 0)
+     return INLINE_SYSCALL_CALL (fchmodat, fd, file, mode);
+ 
++  /* DroidDeck native-mode spike: fchmodat2 is SIGSYS-blocked before Android
++     16 QPR1.  When the app marks it blocked, go straight to the O_PATH + /proc
++     fallback instead of issuing the trapping syscall.  */
++  if (__bl_blocked (BL_BLK_FCHMODAT2))
++    return fchmodat_fallback (fd, file, mode, flag);
++
+   int r = INLINE_SYSCALL_CALL (fchmodat2, fd, file, mode, flag);
+   if (r != 0 && errno == ENOSYS)
+     return fchmodat_fallback (fd, file, mode, flag);

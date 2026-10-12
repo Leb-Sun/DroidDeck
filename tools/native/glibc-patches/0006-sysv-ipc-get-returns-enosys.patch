@@ -1,0 +1,65 @@
+# DroidDeck native-mode spike glibc patch: 0006-sysv-ipc-get-returns-enosys.patch
+# Against upstream glibc 2.43 (glibc_2.43.orig.tar.xz, sha256 d9c86c6b...).
+# Spike code; not for the shipping rootfs without review (Gate 2).
+
+--- a/sysdeps/unix/sysv/linux/shmget.c	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/unix/sysv/linux/shmget.c	2026-10-12 01:04:45.824812245 +0000
+@@ -17,6 +17,7 @@
+ 
+ #include <sys/msg.h>
+ #include <stddef.h>
++#include <errno.h>
+ #include <ipc_priv.h>
+ #include <sysdep.h>
+ 
+@@ -26,9 +27,13 @@
+ int
+ shmget (key_t key, size_t size, int shmflg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (shmget, key, size, shmflg, NULL);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_shmget, key, size, shmflg, NULL);
+-#endif
++  /* DroidDeck native-mode spike: SysV shm/sem/msg are SIGSYS-blocked by
++     Android on every release and CONFIG_SYSVIPC is off in GKI, so no SysV id
++     can exist.  Refuse at the gateway with ENOSYS (upstream Termux glibc does
++     the same; steamclienttermux adds a same-UID broker where Steam needs real
++     semaphores -- see 04 S5).  With no valid id the shmat/shmctl paths are
++     unreachable, so the blocked syscalls are never issued.  */
++  (void) key; (void) size; (void) shmflg;
++  __set_errno (ENOSYS);
++  return -1;
+ }
+--- a/sysdeps/unix/sysv/linux/semget.c	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/unix/sysv/linux/semget.c	2026-10-12 01:04:52.124812087 +0000
+@@ -26,9 +26,8 @@
+ int
+ semget (key_t key, int nsems, int semflg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (semget, key, nsems, semflg);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_semget, key, nsems, semflg, NULL);
+-#endif
++  /* DroidDeck native-mode spike: see shmget.c.  */
++  (void) key; (void) nsems; (void) semflg;
++  __set_errno (ENOSYS);
++  return -1;
+ }
+--- a/sysdeps/unix/sysv/linux/msgget.c	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/unix/sysv/linux/msgget.c	2026-10-12 01:04:58.004811941 +0000
+@@ -25,9 +25,8 @@
+ int
+ msgget (key_t key, int msgflg)
+ {
+-#ifdef __ASSUME_DIRECT_SYSVIPC_SYSCALLS
+-  return INLINE_SYSCALL_CALL (msgget, key, msgflg);
+-#else
+-  return INLINE_SYSCALL_CALL (ipc, IPCOP_msgget, key, msgflg, 0, NULL);
+-#endif
++  /* DroidDeck native-mode spike: see shmget.c.  */
++  (void) key; (void) msgflg;
++  __set_errno (ENOSYS);
++  return -1;
+ }

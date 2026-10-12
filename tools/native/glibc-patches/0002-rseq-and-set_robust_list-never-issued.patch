@@ -1,0 +1,86 @@
+# DroidDeck native-mode spike glibc patch: 0002-rseq-and-set_robust_list-never-issued.patch
+# Against upstream glibc 2.43 (glibc_2.43.orig.tar.xz, sha256 d9c86c6b...).
+# Spike code; not for the shipping rootfs without review (Gate 2).
+
+--- a/sysdeps/nptl/dl-tls_init_tp.c	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/nptl/dl-tls_init_tp.c	2026-10-12 01:01:03.244817799 +0000
+@@ -92,24 +92,25 @@
+     pd->robust_head.futex_offset = (offsetof (pthread_mutex_t, __data.__lock)
+                                     - offsetof (pthread_mutex_t,
+                                                 __data.__list.__next));
+-    int res = INTERNAL_SYSCALL_CALL (set_robust_list, &pd->robust_head,
+-                                     sizeof (struct robust_list_head));
+-    if (!INTERNAL_SYSCALL_ERROR_P (res))
+-      {
++    /* DroidDeck native-mode spike: Android's app seccomp policy answers
++       set_robust_list with SIGSYS on every release (10-17).  With no tracer
++       that SIGSYS kills the process here, at ld.so TLS setup, before any
++       preload exists (01 S0).  Never issue the syscall; leave
++       __nptl_set_robust_list_avail false so new threads skip it too.  The
++       robust_head is still linked for userspace; only the kernel-side
++       owner-death cleanup is lost.  (Termux glibc deletes the same call.)  */
+ #ifndef __ASSUME_SET_ROBUST_LIST
+-        __nptl_set_robust_list_avail = true;
++    __nptl_set_robust_list_avail = false;
+ #endif
+-      }
+   }
+ 
+   {
+-    /* If the registration fails or is disabled by tunable, the public
+-       '__rseq_size' will be set to '0' regardless of the feature size of the
+-       allocated rseq area.  An rseq area of at least 32 bytes is always
+-       allocated since application code is allowed to check the status of the
+-       rseq registration by reading the content of the 'cpu_id' field.  */
+-    bool do_rseq = TUNABLE_GET (rseq, int, NULL);
+-    if (!rseq_register_current_thread (pd, do_rseq))
++    /* DroidDeck native-mode spike: rseq is also answered with SIGSYS by
++       Android on every release.  Pass do_rseq = false unconditionally so
++       rseq_register_current_thread sets cpu_id to REGISTRATION_FAILED and
++       returns without issuing the syscall, independent of GLIBC_TUNABLES.
++       sched_getcpu() then uses its getcpu() fallback.  */
++    if (!rseq_register_current_thread (pd, false))
+       _rseq_size = 0;
+   }
+ 
+--- a/nptl/pthread_create.c	2026-01-23 20:54:00.000000000 +0000
++++ b/nptl/pthread_create.c	2026-10-12 01:20:10.752789163 +0000
+@@ -386,15 +386,20 @@
+       __libc_fatal ("Fatal glibc error: rseq registration failed\n");
+   }
+ 
++  /* DroidDeck native-mode spike: never issue set_robust_list in a new thread.
++     Android SIGSYS-blocks it on every release, and __ASSUME_SET_ROBUST_LIST is
++     defined for our minimum kernel, so the original unconditional call would
++     kill every thread with no tracer.  The robust_head is still linked for
++     userspace; only kernel-side owner-death cleanup is lost.  */
++#if 0
+ #ifndef __ASSUME_SET_ROBUST_LIST
+   if (__nptl_set_robust_list_avail)
+ #endif
+     {
+-      /* This call should never fail because the initial call in init.c
+-	 succeeded.  */
+       INTERNAL_SYSCALL_CALL (set_robust_list, &pd->robust_head,
+ 			     sizeof (struct robust_list_head));
+     }
++#endif
+ 
+   /* This is where the try/finally block should be created.  For
+      compilers without that support we do use setjmp.  */
+--- a/sysdeps/nptl/_Fork.c	2026-01-23 20:54:00.000000000 +0000
++++ b/sysdeps/nptl/_Fork.c	2026-10-12 01:19:57.236789500 +0000
+@@ -49,8 +49,11 @@
+       self->robust_prev = &self->robust_head;
+ #endif
+       self->robust_head.list = &self->robust_head;
+-      INTERNAL_SYSCALL_CALL (set_robust_list, &self->robust_head,
+-			     sizeof (struct robust_list_head));
++      /* DroidDeck native-mode spike: Android SIGSYS-blocks set_robust_list on
++	 every release.  __ASSUME_SET_ROBUST_LIST is defined for our minimum
++	 kernel, so glibc would issue it unconditionally in the fork child and
++	 die with no tracer.  The userspace list is still reset above; only the
++	 kernel-side owner-death cleanup is lost.  */
+       call_function_static_weak (__getrandom_fork_subprocess);
+     }
+ 

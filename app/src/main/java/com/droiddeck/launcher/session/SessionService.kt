@@ -44,6 +44,7 @@ import com.droiddeck.launcher.runtime.BwrapSpawner
 import com.droiddeck.launcher.runtime.LinuxNetworkLinkComponent
 import com.droiddeck.launcher.runtime.LinuxRuntime
 import com.droiddeck.launcher.runtime.ProotFastPath
+import com.droiddeck.launcher.runtime.SpawnServer
 import com.droiddeck.launcher.runtime.UserApps
 import com.droiddeck.launcher.wayland.WaylandCompositor
 import java.io.File
@@ -624,6 +625,8 @@ class SessionService : Service() {
         guest.add("XDG_SESSION_TYPE=wayland")
         guest.add("WAYLAND_DISPLAY=wayland-0")
         guest.add("BL_ANDROID_CLIPBOARD=" + File(filesDir, "session/android-clipboard").path)
+        // The socket the app starts a Flatpak sandbox through (SpawnServer), named for this install.
+        guest.add(SpawnServer.guestEnv(this))
         guest.add("GAMESCOPE_FORCE_GENERAL_QUEUE=1")
         // Steam's CEF needs GL and the rootfs ships no native GL driver: route it through Zink.
         guest.add("MESA_LOADER_DRIVER_OVERRIDE=zink")

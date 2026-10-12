@@ -1,9 +1,6 @@
 package com.droiddeck.launcher.runtime
 
 import android.content.Context
-import android.net.LocalServerSocket
-import android.net.LocalSocket
-import android.os.Process
 import android.system.Os
 import android.util.Base64
 import android.util.Log
@@ -11,12 +8,11 @@ import com.droiddeck.launcher.core.FileUtils
 import com.droiddeck.launcher.core.HostProcess
 import com.droiddeck.launcher.session.SessionPrefs
 import org.json.JSONObject
-import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.nio.file.Files
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Flatpak's sandboxes, started for the runtime's bwrap stand-in (droiddeck-bwrap).
@@ -28,63 +24,24 @@ import java.util.concurrent.atomic.AtomicInteger
  * this builds it under the cache and starts it, then streams the output, the pid and the exit
  * status back until one side goes away: the stand-in ending takes the sandbox down with it.
  *
- * The socket is abstract, so anything on the device could connect: only this app's own uid - the
- * uid every program in the runtime already runs as - is served.
+ * The request comes through SpawnServer, as its "sandbox" kind; the socket, its frames and who may
+ * connect are described there.
  */
-object BwrapSpawner {
+object BwrapSpawner : SpawnServer.Handler {
     private const val TAG = "BwrapSpawner"
-    const val SOCKET = "com.droiddeck.launcher.bwrap"
-    private val seq = AtomicInteger()
-    @Volatile private var server: LocalServerSocket? = null
 
-    /** Listens for sandboxes for the rest of the process's life; later calls do nothing. */
-    @Synchronized
-    fun start(context: Context) {
-        if (server != null) return
-        val app = context.applicationContext
-        val socket = try {
-            LocalServerSocket(SOCKET)
-        } catch (e: IOException) {
-            Log.e(TAG, "cannot listen on $SOCKET", e)
-            return
-        }
-        server = socket
-        FileUtils.delete(File(app.cacheDir, "bwrap"))
-        Thread({
-            while (true) {
-                val client = try { socket.accept() } catch (e: IOException) { Log.e(TAG, "accept", e); break }
-                Thread({ serve(app, client) }, "bwrap-${seq.get() + 1}").apply { isDaemon = true; start() }
-            }
-        }, "bwrap-server").apply { isDaemon = true; start() }
+    /** Sandboxes a killed process left half built. */
+    override fun prepare(context: Context) {
+        FileUtils.delete(File(context.cacheDir, "bwrap"))
     }
 
-    private fun serve(context: Context, client: LocalSocket) {
-        val id = seq.incrementAndGet()
-        val dir = File(context.cacheDir, "bwrap/$id")
-        client.use {
-            val out = DataOutputStream(client.outputStream)
-            try {
-                val peer = client.peerCredentials
-                if (peer.uid != Process.myUid()) {
-                    Log.w(TAG, "refused a sandbox for uid ${peer.uid}")
-                    return
-                }
-                val input = DataInputStream(client.inputStream)
-                val kind = input.readUnsignedByte()
-                val body = ByteArray(input.readInt()).also { input.readFully(it) }
-                if (kind != 'R'.code) return
-                val request = JSONObject(String(body, Charsets.UTF_8))
-                val plan = plan(context, request, dir)
-                run(context, plan, client, out, id)
-            } catch (e: Exception) {
-                Log.e(TAG, "sandbox $id", e)
-                runCatching {
-                    frame(out, 'E', (e.message ?: e.toString()).toByteArray())
-                    frame(out, 'X', "1".toByteArray())
-                }
-            } finally {
-                FileUtils.delete(dir)
-            }
+    override fun serve(context: Context, request: SpawnServer.Request) {
+        val dir = File(context.cacheDir, "bwrap/${request.id}")
+        try {
+            val plan = plan(context, request.body, dir)
+            run(context, plan, request.input, request.out, request.id)
+        } finally {
+            FileUtils.delete(dir)
         }
     }
 
@@ -360,7 +317,7 @@ object BwrapSpawner {
         try { Os.chmod(f.path, mode) } catch (e: Exception) { /* the default mode serves */ }
     }
 
-    private fun run(context: Context, plan: Plan, client: LocalSocket, out: DataOutputStream, id: Int) {
+    private fun run(context: Context, plan: Plan, input: InputStream, out: DataOutputStream, id: Int) {
         val cmd = LinuxRuntime.prootPrefix(context, plan.root, plan.cwd)
         // DROIDDECK_PROOT_VERBOSE=N in the app's environment (flatpak run --env=...) has proot
         // say what it does, to logcat in full: for a sandbox that dies without a word.
@@ -386,10 +343,11 @@ object BwrapSpawner {
         // meanwhile (OrphanReaper) must not take it - an install's extra-data step, say.
         com.droiddeck.launcher.session.OrphanReaper.keep(pid)
         Log.i(TAG, "sandbox $id pid $pid: ${plan.argv.joinToString(" ")} (${plan.binds.size} binds)")
-        synchronized(out) { frame(out, 'P', pid.toString().toByteArray()) }
+        synchronized(out) { SpawnServer.frame(out, 'P', pid.toString().toByteArray()) }
         // The stand-in going away (Flatpak killed, the session over) ends the sandbox.
         Thread({
-            try { while (client.inputStream.read() >= 0) { /* nothing is sent after the request */ } }
+            // A K the stand-in sends as it ends is passed over: the end itself stops the sandbox.
+            try { while (input.read() >= 0) { /* nothing a sandbox needs comes after the request */ } }
             catch (e: IOException) { /* closed */ }
             if (process.isAlive) {
                 Log.i(TAG, "sandbox $id: its bwrap is gone; stopping it")
@@ -409,19 +367,12 @@ object BwrapSpawner {
                         .forEach { Log.i(TAG, "sandbox $id: $it") }
                     logged += n
                 }
-                try { synchronized(out) { frame(out, 'O', buffer.copyOf(n)) } } catch (e: IOException) { break }
+                try { synchronized(out) { SpawnServer.frame(out, 'O', buffer.copyOf(n)) } } catch (e: IOException) { break }
             }
         }
         val status = process.waitFor()
         com.droiddeck.launcher.session.OrphanReaper.release(pid)
         Log.i(TAG, "sandbox $id exited $status")
-        runCatching { synchronized(out) { frame(out, 'X', status.toString().toByteArray()) } }
-    }
-
-    private fun frame(out: DataOutputStream, kind: Char, payload: ByteArray) {
-        out.writeByte(kind.code)
-        out.writeInt(payload.size)
-        out.write(payload)
-        out.flush()
+        runCatching { synchronized(out) { SpawnServer.frame(out, 'X', status.toString().toByteArray()) } }
     }
 }

@@ -6,8 +6,9 @@
 # proot nested inside the session's proot runs every system call through two tracers, some thirty
 # times slower on a program's start. So a sandbox is described to the app instead, over a socket
 # only this app's uid may use, and the app starts it as a proot of its own beside the session's
-# (BwrapSpawner). This process stands in for the sandbox until it ends: its output, its pid for
-# --info-fd, and its exit status come back here.
+# (BwrapSpawner, through SpawnServer). This process stands in for the sandbox until it ends: its
+# output, its pid for --info-fd, and its exit status come back here, and a signal that ends it is
+# passed on first.
 #
 # Sandboxes that remap nothing - Flatpak's install triggers (`--ro-bind / /` and the directory they
 # update) and the D-Bus proxy (every top-level directory bound onto itself) - need no proot at all
@@ -20,8 +21,12 @@ import socket
 import struct
 import sys
 
-SOCKET = "\0com.droiddeck.launcher.bwrap"
+# The app's socket is named for its package, so two installs side by side never share one, and the
+# app tells the guest the name in BL_SPAWN_SOCKET. This is the fixed name apps listened on before.
+LEGACY_SOCKET = "com.droiddeck.launcher.bwrap"
 VERSION = "bubblewrap 0.11.0 (droiddeck)"
+# Signals that end the stand-in, which ends the sandbox: each goes to the app first (frame K).
+FORWARDED = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT, signal.SIGUSR1)
 
 # Options and how many arguments each takes; bwrap(1).
 NO_ARG = {
@@ -239,8 +244,50 @@ def run_here(s):
         sys.exit(1)
 
 
+def spawn_socket():
+    """The app's abstract socket address. Flatpak runs bwrap with an empty environment (the
+    sandbox's own comes as --setenv), and its ld.so cache and extra-data sandboxes get a minimal
+    one, so BL_SPAWN_SOCKET is looked for up the process tree as well: in Flatpak itself, or in
+    what started it."""
+    name = os.environ.get("BL_SPAWN_SOCKET")
+    pid = os.getppid()
+    while not name and pid > 1:
+        try:
+            with open("/proc/%d/environ" % pid, "rb") as f:
+                environ = f.read().split(b"\0")
+            with open("/proc/%d/stat" % pid, "rb") as f:
+                stat = f.read()
+            # "pid (comm) state ppid ...", and comm may hold anything.
+            parent = int(stat[stat.rindex(b")") + 2:].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+        for entry in environ:
+            if entry.startswith(b"BL_SPAWN_SOCKET="):
+                name = entry[len(b"BL_SPAWN_SOCKET="):].decode("utf-8", "surrogateescape")
+        pid = parent
+    return "\0" + (name or LEGACY_SOCKET)
+
+
 def send(sock, kind, payload):
     sock.sendall(kind + struct.pack(">I", len(payload)) + payload)
+
+
+def forward_signals(sock):
+    """Hands each FORWARDED signal to the app as K, then ends the way this process always has:
+    SIGTERM, SIGINT and SIGHUP with status 143, the others by the signal itself."""
+    def forward(sig, _frame):
+        payload = str(int(sig)).encode()
+        try:
+            # Never waits: a frozen or vanished app must not keep this process from ending.
+            sock.send(b"K" + struct.pack(">I", len(payload)) + payload, socket.MSG_DONTWAIT)
+        except OSError:
+            pass
+        if sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            os._exit(128 + 15)
+        signal.signal(sig, signal.SIG_DFL)
+        os.kill(os.getpid(), sig)
+    for sig in FORWARDED:
+        signal.signal(sig, forward)
 
 
 def recv_exact(sock, n):
@@ -266,17 +313,16 @@ def run_by_app(s):
     argv = list(s.command)
     if s.argv0:
         argv[0] = s.argv0
-    request = {"argv": argv, "env": s.env, "cwd": s.cwd or "/", "ops": ops}
+    request = {"kind": "sandbox", "argv": argv, "env": s.env, "cwd": s.cwd or "/", "ops": ops}
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
-        sock.connect(SOCKET)
+        sock.connect(spawn_socket())
     except OSError as e:
         sys.stderr.write("bwrap: DroidDeck is not answering (%s); open DroidDeck and try again\n" % e)
         sys.exit(1)
     send(sock, b"R", json.dumps(request).encode())
     # This process is the sandbox as far as Flatpak is concerned: ended, it takes the sandbox down.
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, lambda *_: os._exit(128 + 15))
+    forward_signals(sock)
     status = 1
     out = sys.stdout.buffer
     while True:
@@ -297,6 +343,10 @@ def run_by_app(s):
             sys.stderr.write("bwrap: %s\n" % payload.decode("utf-8", "replace"))
         elif kind == b"X":
             status = int(payload)
+            break
+        elif kind == b"F":
+            # Running here is the fallback for other kinds; a sandbox has no such way.
+            sys.stderr.write("bwrap: DroidDeck did not start the sandbox: %s\n" % payload.decode("utf-8", "replace"))
             break
     for fd in s.json_fds:
         try:

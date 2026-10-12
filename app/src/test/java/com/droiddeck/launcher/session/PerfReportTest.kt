@@ -1,5 +1,6 @@
 package com.droiddeck.launcher.session
 
+import com.droiddeck.launcher.core.CapProbe
 import com.droiddeck.launcher.core.LogRedactor
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -129,6 +130,25 @@ class PerfReportTest {
         assertTrue(text, text.contains("steam 90.0% of"))
         // Share logs scrubs every line: nothing here may look like an address or a secret.
         lines.forEach { assertEquals(it, LogRedactor.redactForShare(it)) }
+    }
+
+    @Test fun theCapabilityProbeIsPartOfTheDevice() {
+        val caps = CapProbe.fromReport(
+            "capprobe 1 ok\nopenat2 allowed ret=3 errno=0 step=1\nclone3 blocked step=1\nsetresuid allowed ret=0 errno=0 step=1\n",
+            mapOf("sdk" to 34), 18,
+        )
+        val withCaps = PerfInfo(info.generated, info.build, info.device, info.toggles, info.ticksPerSecond, caps)
+        val device = PerfReport.build(withCaps, session).getJSONObject("device")
+        assertEquals("AYN Odin", device.getString("model"))
+        assertEquals("f", device.getJSONObject("caps").getString("nativeBlock"))
+        assertEquals("blocked", device.getJSONObject("caps").getJSONObject("tests").getJSONObject("clone3").getString("state"))
+        val lines = PerfReport.summary(withCaps, session).lines()
+        val at = lines.indexOfFirst { it.startsWith("caps     seccomp: openat2 ok, clone3 blocked") }
+        assertTrue(lines.joinToString("\n"), at > 0 && lines[at - 1].startsWith("device") && lines[at + 2].startsWith("toggles"))
+        lines.forEach { assertEquals(it, LogRedactor.redactForShare(it)) }
+        // Without a probe the report is as it was.
+        assertFalse(PerfReport.build(info, session).getJSONObject("device").has("caps"))
+        assertFalse(PerfReport.summary(info, session).contains("caps "))
     }
 
     @Test fun aSessionWithoutCountersStillSaysWhatItKnows() {

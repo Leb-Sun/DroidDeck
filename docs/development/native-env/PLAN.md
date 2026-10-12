@@ -63,7 +63,7 @@ What remains is mostly structural:
   with the toggles off, so a comparison never mixes packages, runtimes or signatures.
 - **Over adb.** The owner runs adb from Termux on the phone itself (Wireless debugging,
   `adb connect localhost:<port>`), so scripted runs go through `tools/droiddeckctl` under Termux's
-  Python. It hardcodes `com.droiddeck.launcher` until the harness adds a package option.
+  Python, with `DROIDDECK_PACKAGE=com.droiddeck.env` (or `--package`). See `harness.md`.
 
 ## Phases and gates
 
@@ -127,5 +127,5 @@ decides which layer goes first, and what "faster" means in numbers.
   load-bearing (Phase 1).
 - `02-landscape-and-constraints.md`: other projects, interception technology, and the limits
   Android puts on a non-root app (Phase 1).
-- `harness.md`: how to take a baseline on the device (Phase 1, in progress).
+- `harness.md`: how to take a baseline on the device, and what the report measures (Phase 1).
 - `03-design.md`, `04-spikes.md`: the layered design and its feasibility spikes (Phase 2).

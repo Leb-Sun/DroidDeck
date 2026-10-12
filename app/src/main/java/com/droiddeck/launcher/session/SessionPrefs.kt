@@ -409,6 +409,16 @@ object SessionPrefs {
     }
 
     /**
+     * Whether Android is told when a session is loading and whether a game or Big Picture is in front
+     * (GameStateHints, GameManager.setGameState on Android 13+). Off by default.
+     */
+    fun gameStateHints(context: Context): Boolean = prefs(context).getBoolean("gameStateHints", false)
+
+    fun setGameStateHints(context: Context, on: Boolean) {
+        prefs(context).edit().putBoolean("gameStateHints", on).apply()
+    }
+
+    /**
      * Whether sessions write a performance report (SessionPerf): proot's stops, the tracer's CPU and
      * the fast path's hits through each phase, into perf-report.txt and .json in the session's logs.
      * Off by default, and off nothing is counted.

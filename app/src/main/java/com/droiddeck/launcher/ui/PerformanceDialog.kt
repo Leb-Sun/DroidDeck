@@ -47,6 +47,7 @@ fun PerformancePage(
     prootNoSeccomp: Boolean,
     prootFastPath: Boolean,
     prootExitKill: Boolean,
+    gameStateHints: Boolean,
     perfReport: Boolean,
     guestHostname: String,
     phantomWarning: String?,
@@ -64,6 +65,7 @@ fun PerformancePage(
     onProotNoSeccomp: (Boolean) -> Unit,
     onProotFastPath: (Boolean) -> Unit,
     onProotExitKill: (Boolean) -> Unit,
+    onGameStateHints: (Boolean) -> Unit,
     onPerfReport: (Boolean) -> Unit,
     onCopyPerfReport: () -> Unit,
     onGuestHostname: (String) -> Unit,
@@ -167,6 +169,13 @@ fun PerformancePage(
                 host, "exitkill", stringResource(R.string.perf_exitkill),
                 stringResource(R.string.perf_exitkill_hint),
                 prootExitKill, onChange = onProotExitKill,
+            )
+            val gameStateSupported = android.os.Build.VERSION.SDK_INT >= 33
+            ToggleRow(
+                host, "gamestate", stringResource(R.string.perf_gamestate),
+                if (gameStateSupported) stringResource(R.string.perf_gamestate_hint)
+                else stringResource(R.string.perf_gamestate_needs_13),
+                gameStateHints && gameStateSupported, enabled = gameStateSupported, onChange = onGameStateHints,
             )
         }
         SettingsGroup(stringResource(R.string.perf_measure)) {

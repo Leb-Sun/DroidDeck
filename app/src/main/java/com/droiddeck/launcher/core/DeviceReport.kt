@@ -164,6 +164,7 @@ object DeviceReport {
         k("proot without seccomp", SessionPrefs.prootNoSeccomp(context))
         k("proot fast path", SessionPrefs.prootFastPath(context))
         k("proot exit kill", SessionPrefs.prootExitKill(context))
+        k("Game state hints", SessionPrefs.gameStateHints(context))
         k("Performance report", SessionPrefs.perfReport(context))
         k("Guest host name", SessionPrefs.guestHostname(context))
         k("DirectAudio for games", SessionPrefs.directAudio(context))

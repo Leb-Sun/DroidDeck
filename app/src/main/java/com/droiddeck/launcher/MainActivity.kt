@@ -155,6 +155,7 @@ class MainActivity : ComponentActivity() {
     private var prootNoSeccomp by mutableStateOf(false)
     private var prootFastPath by mutableStateOf(true)
     private var prootExitKill by mutableStateOf(false)
+    private var gameStateHints by mutableStateOf(false)
     private var perfReport by mutableStateOf(false)
     private var guestHostname by mutableStateOf(SessionPrefs.DEFAULT_GUEST_HOSTNAME)
     private var phantomWarning by mutableStateOf<String?>(null)
@@ -1416,7 +1417,8 @@ class MainActivity : ComponentActivity() {
             fsyncFirst = fsyncFirst,
             gamescopeRealtime = gamescopeRealtime,
             gpuClockPin = gpuClockPin,
-            prootNoSeccomp = prootNoSeccomp, prootFastPath = prootFastPath, prootExitKill = prootExitKill, perfReport = perfReport,
+            prootNoSeccomp = prootNoSeccomp, prootFastPath = prootFastPath, prootExitKill = prootExitKill,
+            gameStateHints = gameStateHints, perfReport = perfReport,
             guestHostname = guestHostname, phantomWarning = phantomWarning,
             onClientOverride = { on -> SessionPrefs.setClientCpusOverride(this, on); clientOverride = on },
             onTuSysmem = { on -> SessionPrefs.setTuSysmem(this, on); tuSysmem = on },
@@ -1432,6 +1434,7 @@ class MainActivity : ComponentActivity() {
             onProotNoSeccomp = { on -> SessionPrefs.setProotNoSeccomp(this, on); prootNoSeccomp = on },
             onProotFastPath = { on -> SessionPrefs.setProotFastPath(this, on); prootFastPath = on },
             onProotExitKill = { on -> SessionPrefs.setProotExitKill(this, on); prootExitKill = on },
+            onGameStateHints = { on -> SessionPrefs.setGameStateHints(this, on); gameStateHints = on },
             onPerfReport = { on -> SessionPrefs.setPerfReport(this, on); perfReport = on },
             onCopyPerfReport = {
                 val summary = com.droiddeck.launcher.session.SessionPerf.latestSummary(this)
@@ -1596,6 +1599,7 @@ class MainActivity : ComponentActivity() {
         prootNoSeccomp = SessionPrefs.prootNoSeccomp(this)
         prootFastPath = SessionPrefs.prootFastPath(this)
         prootExitKill = SessionPrefs.prootExitKill(this)
+        gameStateHints = SessionPrefs.gameStateHints(this)
         perfReport = SessionPrefs.perfReport(this)
         guestHostname = SessionPrefs.guestHostname(this)
         refreshPhantomStatus()

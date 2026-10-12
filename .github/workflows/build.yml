@@ -187,7 +187,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: app/src/main/assets/linuxfs
-          key: preloads-${{ env.PRELOAD_CACHE_VERSION }}-${{ hashFiles('app/src/main/cpp/fakeinput_steam.cpp', 'tools/linuxfs/preload/*.c', 'tools/linuxfs/build-x86-preloads.sh', 'tools/linuxfs/fex/*', 'tools/linuxfs/clipboard/*.c', 'tools/linuxfs/ssbs/*.c', 'tools/proot/fastpath/*.c', 'tools/linuxfs/overlay/usr/local/bin/*', 'tools/linuxfs/overlay/usr/bin/**', 'tools/linuxfs/desktop/*', 'tools/gamescope/release.env', 'tools/wlroots/release.env', 'tools/linuxfs/uruntime.env', 'tools/linuxfs/licenses/*', 'tools/mangoapp/*', 'tools/msitools/**', 'tools/linuxfs/debian-image.env') }}
+          key: preloads-${{ env.PRELOAD_CACHE_VERSION }}-${{ hashFiles('app/src/main/cpp/fakeinput_steam.cpp', 'tools/linuxfs/preload/*.c', 'tools/linuxfs/build-x86-preloads.sh', 'tools/linuxfs/fex/*', 'tools/linuxfs/clipboard/*.c', 'tools/linuxfs/ssbs/*.c', 'tools/proot/fastpath/*.c', 'tools/linuxfs/overlay/usr/local/bin/*', 'tools/linuxfs/overlay/usr/bin/**', 'tools/linuxfs/desktop/*', 'tools/gamescope/release.env', 'tools/glibc/release.env', 'tools/glibc/manifest.py', 'tools/wlroots/release.env', 'tools/linuxfs/uruntime.env', 'tools/linuxfs/licenses/*', 'tools/mangoapp/*', 'tools/msitools/**', 'tools/linuxfs/debian-image.env') }}
 
       - name: Build libfakeinput.so and libblsession.so (glibc aarch64)
         if: steps.preloads.outputs.cache-hit != 'true'
@@ -232,6 +232,31 @@ jobs:
             tar --use-compress-program=unzstd -xf gamescope.tzst -C "$D"
             test -f "$D/usr/local/bin/gamescope"
             rm gamescope.tzst
+          fi
+          # The glibc overlay (tools/glibc): both flavors and the manifest the app hashes the
+          # rootfs against before it stages anything, from the pinned release, checked file by file.
+          # No tag yet: the apk carries no overlay.
+          . tools/glibc/release.env
+          if [ -n "${GLIBC_TAG:-}" ]; then
+            . tools/glibc/source.env
+            mkdir -p glibc-dl
+            for asset in glibc-manifest.txt glibc-rebuild.tzst glibc-patched.tzst; do
+              gh release download "$GLIBC_TAG" -R "$GLIBC_REPO" -p "$asset" -O "glibc-dl/$asset"
+            done
+            printf '%s  %s\n' "$GLIBC_MANIFEST_SHA256" glibc-dl/glibc-manifest.txt \
+              "$GLIBC_REBUILD_SHA256" glibc-dl/glibc-rebuild.tzst "$GLIBC_PATCHED_SHA256" glibc-dl/glibc-patched.tzst | sha256sum -c -
+            version=$(sed -n 's/^version //p' glibc-dl/glibc-manifest.txt)
+            test "$version" = "$GLIBC_PKGVER-$GLIBC_PKGREL"
+            G="$D/glibc/$version"
+            mkdir -p "$G/rebuild" "$G/patched"
+            install -m644 glibc-dl/glibc-manifest.txt "$G/manifest"
+            for flavor in rebuild patched; do
+              tar --use-compress-program=unzstd -xf "glibc-dl/glibc-$flavor.tzst" -C "$G/$flavor"
+            done
+            python3 tools/glibc/manifest.py check "$G"
+            rm -rf glibc-dl
+          else
+            echo "tools/glibc/release.env names no release: the apk carries no glibc overlay"
           fi
           . tools/linuxfs/uruntime.env
           curl -fsSL --retry 3 -o uruntime "https://github.com/VHSgunzo/uruntime/releases/download/${URUNTIME_VERSION}/${URUNTIME_ASSET}"

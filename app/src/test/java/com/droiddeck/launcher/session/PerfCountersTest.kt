@@ -2,7 +2,9 @@ package com.droiddeck.launcher.session
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -51,6 +53,65 @@ class PerfCountersTest {
         assertEquals(listOf("openat", "set_robust_list", "execve"), stops.syscalls.keys.toList())
         assertEquals(SyscallStops(0, 0, 7, 140_000), stops.syscalls["set_robust_list"])
         assertEquals(8L, stops.syscalls.getValue("execve").stops)
+        // The tracer's own pid is in the header, and its first bytes are enough for it.
+        assertEquals(4242, stops.pid)
+        val file = stopsFile(emptyList(), kinds)
+        assertEquals(4242, PerfCounters.statsPid(file.copyOf(PerfCounters.STATS_PID_BYTES)))
+        assertNull(PerfCounters.statsPid(stopsFile(emptyList(), kinds, magic = "\u0000".repeat(8)).copyOf(40)))
+        assertNull(PerfCounters.statsPid(file.copyOf(32)))
+    }
+
+    @Test fun everyTracersCounterFileHasARoleByItsName() {
+        assertEquals("session", PerfCounters.tracerRole("proot.stats"))
+        assertEquals("game", PerfCounters.tracerRole("proot-game-1.stats"))
+        assertEquals("net", PerfCounters.tracerRole("proot-net-12345.stats"))
+        assertNull(PerfCounters.tracerRole("fastpath"))
+        assertNull(PerfCounters.tracerRole("proot.stats.tmp"))
+        assertNull(PerfCounters.tracerRole("proot-.stats"))
+    }
+
+    @Test fun procStatusGivesUidParentTracerAndMemory() {
+        val status = "Name:\tproot\nUmask:\t0077\nState:\tS (sleeping)\nTgid:\t4321\nPid:\t4321\nPPid:\t4000\n" +
+            "TracerPid:\t3999\nUid:\t10234\t10234\t10234\t10234\nGid:\t10234\t10234\t10234\t10234\n" +
+            "VmPeak:\t  900000 kB\nVmRSS:\t  123456 kB\nThreads:\t3\n"
+        assertEquals(ProcStatus(uid = 10234, ppid = 4000, tracerPid = 3999, rssKb = 123456), PerfCounters.parseStatus(status))
+        // A kernel thread has no VmRSS.
+        assertEquals(0L, PerfCounters.parseStatus("PPid:\t2\nTracerPid:\t0\nUid:\t0\t0\t0\t0\n")!!.rssKb)
+        assertNull(PerfCounters.parseStatus("Name:\tx\n"))
+    }
+
+    @Test fun appProcessesAreThePackageAndItsNamedProcesses() {
+        fun cmdline(vararg args: String) = args.joinToString("\u0000", postfix = "\u0000").toByteArray()
+        assertTrue(PerfCounters.isAppProcess(cmdline("com.droiddeck.env"), "com.droiddeck.env"))
+        assertTrue(PerfCounters.isAppProcess(cmdline("com.droiddeck.env:game"), "com.droiddeck.env"))
+        assertFalse(PerfCounters.isAppProcess(cmdline("com.droiddeck.envx"), "com.droiddeck.env"))
+        assertFalse(PerfCounters.isAppProcess(cmdline("/data/app/x/lib/arm64/libproot.so", "com.droiddeck.env"), "com.droiddeck.env"))
+        assertFalse(PerfCounters.isAppProcess(ByteArray(0), "com.droiddeck.env"))
+    }
+
+    @Test fun glibcStateIsStateThenPackageVersion() {
+        assertEquals(mapOf("state" to "stock"), PerfCounters.glibcState(null))
+        assertEquals(mapOf("state" to "stock"), PerfCounters.glibcState("  \n"))
+        assertEquals(mapOf("state" to "patched", "pkgver" to "2.43+r5+g1234-1"), PerfCounters.glibcState("patched 2.43+r5+g1234-1\n"))
+        assertEquals(mapOf("state" to "mismatch", "pkgver" to null), PerfCounters.glibcState("mismatch"))
+    }
+
+    @Test fun batteryPowerIsReadInTheUnitsOemsUse() {
+        // Documented units: µA, mV; discharging is negative.
+        assertEquals(4000.0, PerfCounters.powerMw(-1_000_000, 4000)!!, 1e-9)
+        // The same draw in mA, and with the sign the other way round.
+        assertEquals(4000.0, PerfCounters.powerMw(1000, 4000)!!, 1e-9)
+        assertEquals("mA", PerfCounters.currentUnit(1000))
+        assertEquals("uA", PerfCounters.currentUnit(-1_000_000))
+        // Voltage in µV or in whole volts.
+        assertEquals(4000.0, PerfCounters.powerMw(-1_000_000, 4_000_000)!!, 1e-9)
+        assertEquals(4000.0, PerfCounters.powerMw(-1_000_000, 4)!!, 1e-9)
+        assertEquals("uV", PerfCounters.voltageUnit(4_000_000))
+        assertEquals("V", PerfCounters.voltageUnit(4))
+        assertEquals("mV", PerfCounters.voltageUnit(4012))
+        // BatteryManager's "unsupported", and no voltage.
+        assertNull(PerfCounters.powerMw(Long.MIN_VALUE, 4000))
+        assertNull(PerfCounters.powerMw(-1_000_000, -1))
     }
 
     @Test fun aFileNotYetFilledInOrOfAnotherVersionReadsAsNothing() {

@@ -13,6 +13,7 @@ import android.os.Bundle
 import android.os.Process
 import android.util.Base64
 import com.droiddeck.launcher.BuildConfig
+import com.droiddeck.launcher.core.CapProbe
 import com.droiddeck.launcher.frontend.GameLaunchLink
 import com.droiddeck.launcher.runtime.LinuxRuntime
 import com.droiddeck.launcher.runtime.LinuxRuntimeInstaller
@@ -175,6 +176,8 @@ class AgentBridgeProvider : ContentProvider() {
                 .put("guest", hello != null)
                 .put("guestFocus", hello?.optBoolean("focus") ?: false)
                 .put("commands", AgentAccess.commandsAllowed(context)))
+            // This boot's capability probe (CapProbe), as the Performance report's device.caps.
+            .put("caps", CapProbe.cached(context)?.let(CapProbe::toJson) ?: JSONObject.NULL)
             .put("session", session)
     }
 

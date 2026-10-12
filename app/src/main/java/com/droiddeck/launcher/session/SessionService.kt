@@ -26,6 +26,8 @@ import com.droiddeck.launcher.R
 import com.droiddeck.launcher.SessionActivity
 import com.droiddeck.launcher.audio.DirectAudioRelayComponent
 import com.droiddeck.launcher.audio.PulseAudioComponent
+import com.droiddeck.launcher.core.CapProbe
+import com.droiddeck.launcher.core.Caps
 import com.droiddeck.launcher.core.CpuCores
 import com.droiddeck.launcher.core.DeviceReport
 import com.droiddeck.launcher.core.HostEnvironment
@@ -339,8 +341,12 @@ class SessionService : Service() {
 
         val sessionDir = openSessionFolder()
         val sessionLog = File(sessionDir, "session.log")
+        // What this device's seccomp filter and kernel allow, probed once a boot (CapProbe), report or
+        // not: the guest's BL_NATIVE_BLOCK and BL_CAPS come from it.
+        val caps = CapProbe.get(this)
+        Log.i(TAG, "caps: " + CapProbe.summary(caps).first())
         // Performance > Performance report; null, and nothing counted, when it is off.
-        val perf = SessionPerf.begin(this, sessionDir)
+        val perf = SessionPerf.begin(this, sessionDir, caps)
 
         Log.i(TAG, GpuClockPin.start(this))
 
@@ -357,7 +363,7 @@ class SessionService : Service() {
                 .onSuccess { if (it != null) Log.i(TAG, it) }
                 .onFailure { Log.w(TAG, "forced components", it) }
         }
-        addClientEnvironment(guest, steamHere)
+        addClientEnvironment(guest, steamHere, caps)
         // Where the fast path's description of proot's view goes, once the binds are known.
         val fastPathAt = guest.size
 
@@ -588,7 +594,7 @@ class SessionService : Service() {
     }
 
     /** The guest's base environment: paths, the display, the GL/Vulkan stack and the client's switches. */
-    private fun addClientEnvironment(guest: MutableList<String>, steamHere: Boolean) {
+    private fun addClientEnvironment(guest: MutableList<String>, steamHere: Boolean, caps: Caps) {
         guest.add("/usr/bin/env")
         guest.add("-i")
         guest.add("HOME=/root")
@@ -650,6 +656,10 @@ class SessionService : Service() {
         // every thread start paid a SIGSYS that proot answers; the malloc top pad grows the heap
         // 16 MB at a time instead of 128 KB, and every brk(2) is a proot stop too.
         guest.add("GLIBC_TUNABLES=glibc.pthread.rseq=0:glibc.malloc.top_pad=16777216")
+        // The calls this device's filter traps, for the patched glibc to leave alone (stock glibc
+        // ignores it), and what the probe found usable. Neither when the probe failed: an unset
+        // BL_NATIVE_BLOCK is the glibc's worst case, every gated call assumed trapped.
+        guest.addAll(CapProbe.guestEnv(caps))
         if (SessionState.mode == MODE_STEAM) guest.add("BL_MANGOAPP=" + (if (SessionPrefs.mangoapp(this)) "1" else "0"))
         if (SessionState.mode == MODE_STEAM) {
             guest.add("BL_GAMESCOPE_STRETCH_16X9=" + (if (SessionPrefs.stretch16x9(this)) "1" else "0"))

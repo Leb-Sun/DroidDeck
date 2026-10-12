@@ -7,6 +7,7 @@ import android.system.Os
 import android.system.OsConstants
 import android.util.Log
 import com.droiddeck.launcher.BuildConfig
+import com.droiddeck.launcher.core.Caps
 import com.droiddeck.launcher.core.CpuCores
 import com.droiddeck.launcher.gpu.SocNames
 import java.io.File
@@ -43,9 +44,10 @@ object SessionPerf {
     /**
      * The report for the session whose folder is [sessionDir], when it is on; null otherwise. On or
      * off, the counter files an earlier session left are deleted first: they must never be summed
-     * into a new report, and an earlier session with the report on can leave thousands.
+     * into a new report, and an earlier session with the report on can leave thousands. [caps], the
+     * capability probe's answer (CapProbe), goes into the report as device.caps.
      */
-    fun begin(context: Context, sessionDir: File): Sampler? {
+    fun begin(context: Context, sessionDir: File, caps: Caps? = null): Sampler? {
         current?.let {
             it.awaitEnd(REPLACED_WAIT_MS)
             it.stop()
@@ -54,7 +56,7 @@ object SessionPerf {
         File(context.cacheDir, COUNTER_DIR).deleteRecursively()
         if (!SessionPrefs.perfReport(context)) return null
         return try {
-            Sampler(context.applicationContext, sessionDir).also { current = it }
+            Sampler(context.applicationContext, sessionDir, caps).also { current = it }
         } catch (e: Exception) {
             Log.w(TAG, "performance report not started", e)
             null
@@ -79,7 +81,7 @@ object SessionPerf {
         SessionPaths.sessionFolders(context).asReversed()
             .firstNotNullOfOrNull { dir -> File(dir, REPORT_TEXT).takeIf { it.isFile }?.let { runCatching { it.readText() }.getOrNull() } }
 
-    class Sampler internal constructor(private val context: Context, val sessionDir: File) {
+    class Sampler internal constructor(private val context: Context, val sessionDir: File, private val caps: Caps?) {
         private val counterDir = File(context.cacheDir, COUNTER_DIR)
         /** PROOT_STATS, in proot's own environment. */
         val prootStats = File(counterDir, "proot.stats")
@@ -272,7 +274,7 @@ object SessionPerf {
                 generated = utc("yyyy-MM-dd HH:mm 'UTC'"),
                 build = build, device = device,
                 toggles = linkedMapOf<String, Any?>("fastPathActive" to fastPathActive) + toggles,
-                ticksPerSecond = ticksPerSecond,
+                ticksPerSecond = ticksPerSecond, caps = caps,
             )
             replace(File(sessionDir, REPORT_JSON), PerfReport.build(info, snapshots).toString(1))
             replace(File(sessionDir, REPORT_TEXT), PerfReport.summary(info, snapshots))

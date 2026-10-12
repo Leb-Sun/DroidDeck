@@ -1,5 +1,7 @@
 package com.droiddeck.launcher.session
 
+import com.droiddeck.launcher.core.CapProbe
+import com.droiddeck.launcher.core.Caps
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Locale
@@ -41,13 +43,17 @@ class PerfSnapshot(
     val fastPath: Map<String, FamilyCounts>,
 )
 
-/** What the report says about the build, the device and the settings, besides the measurements. */
+/**
+ * What the report says about the build, the device and the settings, besides the measurements.
+ * [caps] is the capability probe's answer (CapProbe), reported as device.caps.
+ */
 class PerfInfo(
     val generated: String,
     val build: Map<String, Any?>,
     val device: Map<String, Any?>,
     val toggles: Map<String, Any?>,
     val ticksPerSecond: Long,
+    val caps: Caps? = null,
 )
 
 /**
@@ -106,7 +112,7 @@ object PerfReport {
             .put("schema", SCHEMA)
             .put("generated", info.generated)
             .put("build", JSONObject(info.build))
-            .put("device", JSONObject(info.device))
+            .put("device", JSONObject(info.device).apply { info.caps?.let { put("caps", CapProbe.toJson(it)) } })
             .put("toggles", JSONObject(info.toggles))
             .put("clockTicksPerSecond", info.ticksPerSecond)
         json.put("milestones", JSONArray().apply {
@@ -151,6 +157,9 @@ object PerfReport {
             info.device["cpus"]?.let { "$it CPUs" },
             info.device["pageSize"]?.let { "${(it as Number).toLong() / 1024} KB pages" },
         ).filterNotNull().joinToString(" · "))
+        info.caps?.let { caps ->
+            CapProbe.summary(caps).forEachIndexed { i, text -> line((if (i == 0) "caps     " else "         ") + text) }
+        }
         line("toggles  " + info.toggles.entries.joinToString(" · ") { (k, v) -> "$k ${onOff(v)}" })
         val times = times(snapshots)
         line("times    " + listOfNotNull(

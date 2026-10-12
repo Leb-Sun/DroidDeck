@@ -1,0 +1,119 @@
+name: Build glibc (native environment)
+
+# The runtime's own glibc (Arch Linux ARM's 2.43+r22+g8362e8ce10b2-2, tools/glibc/source.env)
+# built twice with Arch's PKGBUILD in an Arch Linux ARM container on an arm64 runner: as Arch builds
+# it ("rebuild") and with tools/glibc/patches ("patched"), each checked against the stock package
+# with abidiff, then published as release assets the apk build fetches (tools/glibc/release.env
+# names the tag and sha256s). The hosted runtime image is never changed: the app stages the files
+# per session behind Performance > Patched glibc (session/NativeGlibc.kt).
+#
+# A push publishes to a tag named after the inputs (version and a hash of source.env, the patches
+# and the scripts), and never replaces a release that exists: release.env may already pin its
+# sha256s. A dispatch publishes to the tag it is given, as build-gamescope.yml does.
+on:
+  push:
+    branches: [ Environment-work ]
+    paths:
+      - 'tools/glibc/**'
+      - '!tools/glibc/release.env'
+      - '!tools/glibc/*.md'
+      - '.github/workflows/build-glibc.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish as (e.g. glibc-2.43-r22-2-p1); empty = artifact only'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-glibc-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build in Arch Linux ARM
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/work" -w /work menci/archlinuxarm:base-devel bash tools/glibc/build-in-arch.sh
+          sudo chown -R "$(id -u):$(id -g)" .
+      # The same abidiff check with Ubuntu's libabigail, whether or not the container had one.
+      - name: abidiff against the stock package
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq abigail-tools >/dev/null
+          bash tools/glibc/abidiff.sh glibc-build | tee -a glibc-out/build-record.txt
+          { echo '```'; cat glibc-out/build-record.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glibc-overlay
+          path: |
+            glibc-out/glibc-manifest.txt
+            glibc-out/glibc-rebuild.tzst
+            glibc-out/glibc-patched.tzst
+            glibc-out/SHA256SUMS
+            glibc-out/build-record.txt
+          if-no-files-found: error
+      - name: Publish
+        if: github.event_name == 'push' || inputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          . tools/glibc/source.env
+          . tools/glibc/release.env
+          repo=${GLIBC_REPO:-$GITHUB_REPOSITORY}
+          if [ "$repo" != "$GITHUB_REPOSITORY" ]; then
+            echo "::notice::tools/glibc/release.env names $repo; this run's token can publish only to $GITHUB_REPOSITORY, so the build is an artifact only"
+            exit 0
+          fi
+          assets=(glibc-out/glibc-manifest.txt glibc-out/glibc-rebuild.tzst glibc-out/glibc-patched.tzst glibc-out/SHA256SUMS)
+          notes="glibc $GLIBC_PKGVER-$GLIBC_PKGREL (Arch Linux ARM, $GLIBC_COMMIT) for the app's per-session overlay: rebuild = Arch's own build, patched = with tools/glibc/patches. Built from $GITHUB_SHA. $(tr '\n' ' ' < glibc-out/SHA256SUMS)"
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            inputs=$(cat tools/glibc/source.env tools/glibc/build-in-arch.sh tools/glibc/manifest.py tools/glibc/patches/*.patch | sha256sum | cut -c1-12)
+            v=${GLIBC_PKGVER%+g*}
+            tag="glibc-${v//+/-}-$GLIBC_PKGREL-$inputs"
+            if gh release view "$tag" -R "$repo" --json assets --jq '.assets[].name' > existing.txt 2>/dev/null; then
+              have=0
+              for a in "${assets[@]}"; do grep -qx "$(basename "$a")" existing.txt && have=$((have + 1)); done
+              if [ "$have" -eq "${#assets[@]}" ]; then
+                # Same inputs, built before: what is there stays, as release.env may pin it.
+                echo "::notice::$tag exists with all its assets; they are kept"
+              else
+                # An interrupted publish never printed its sha256s, so nothing can pin it: this
+                # build's set replaces it whole, never mixed with an earlier one.
+                gh release upload "$tag" -R "$repo" "${assets[@]}" --clobber
+              fi
+            else
+              gh release create "$tag" -R "$repo" --target "$GITHUB_SHA" --latest=false --prerelease=false \
+                --title "$tag" --notes "$notes" "${assets[@]}"
+            fi
+          else
+            tag=$INPUT_TAG
+            gh release create "$tag" -R "$repo" --target "$GITHUB_SHA" --latest=false --prerelease=false \
+              --title "$tag" --notes "$notes" "${assets[@]}" \
+              || gh release upload "$tag" -R "$repo" "${assets[@]}" --clobber
+          fi
+          # A component the apk fetches by tag, never something users install: it must not
+          # become the repo's Latest release or appear as a pre-release, also when re-uploaded.
+          gh release edit "$tag" -R "$repo" --latest=false --prerelease=false
+          gh release download "$tag" -R "$repo" -p SHA256SUMS -O published.sha256 --clobber
+          sha() { awk -v f="$1" '$2 == f { print $1 }' published.sha256; }
+          {
+            echo "### tools/glibc/release.env for $tag"
+            echo '```'
+            echo "GLIBC_REPO=$repo"
+            echo "GLIBC_TAG=$tag"
+            echo "GLIBC_MANIFEST_SHA256=$(sha glibc-manifest.txt)"
+            echo "GLIBC_REBUILD_SHA256=$(sha glibc-rebuild.tzst)"
+            echo "GLIBC_PATCHED_SHA256=$(sha glibc-patched.tzst)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

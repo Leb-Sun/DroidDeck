@@ -30,6 +30,46 @@ syscalls, stops by kind, and the fast path's hit rate per program group. Columns
 `traps/s` is proot stops per second; `tracer%` and `tree%` are CPU as a percentage of one core
 (the tree can exceed 100); `fp hit%` is the share of fast-path-eligible calls answered in-process.
 
+## Capabilities
+
+At every session start, report on or off, the app asks the device's own seccomp filter and kernel
+which of the calls Android's releases differ on it allows (`core/CapProbe.kt`,
+`app/src/main/cpp/hostsys/capprobe.c`, `03-design.md` §3.3); adb does not run under the app's
+filter, so only the app can ask. Each test runs in a child of its own, so a trapped call kills only
+that child. The answer is kept in `files/caps.json` for the rest of the boot (keyed on the boot id,
+the build fingerprint and the version code), so only the first session after a boot or an update
+pays for the probe: one fork of the app and a few milliseconds. `perf-report.txt` shows it under
+`device`, for example on Android 15:
+
+```
+caps     seccomp: openat2 blocked, faccessat2 blocked, fchmodat2 blocked, clone3 ok, close_range ok, landlock ok; uclamp ok · BL_NATIVE_BLOCK=6 · probed in 24 ms
+         fp_stub ok, execmem ok, exec_data ok, userfaultfd ok, memfd_create ok, setresuid ok · blocked: resolve_in_root, rseq, set_robust_list, get_robust_list, futex_waitv, io_uring_setup, setuid
+```
+
+- `ok` is usable here; `blocked` is the filter's `SIGSYS`; an errno name is a call the filter let
+  through and the kernel refused (`ENOSYS`: no such call; uclamp's `EOPNOTSUPP`: a kernel without
+  it); `error` is a test that could not tell.
+- The first line is the version-gated calls, then uclamp (`uclamp_min` 512 on the test's own
+  thread, read back). The second has the rest:
+  - `resolve_in_root`: an absolute symlink under `openat2(RESOLVE_IN_ROOT)` stays in the root;
+  - `fp_stub`: the fast path's stub page at its fixed address, made executable, answers `getpid`;
+  - `execmem`, `exec_data`: executable anonymous memory, and an executable map of an app file;
+  - `setresuid`, allowed everywhere, is the probe's own check: when it is not `ok` the whole probe is
+    distrusted; `rseq` and the other always-blocked calls are a sanity check.
+- `BL_NATIVE_BLOCK`, in the guest, is the patched glibc's mask (`tools/native/glibc-patches/0001`;
+  stock glibc ignores it): `0x1` clone3, `0x2` faccessat2, `0x4` fchmodat2, `0x8` close_range, set
+  unless the call came back allowed. By `02` §3 that is `f` up to Android 12, `7` on 13 and 14, `6`
+  on 14 QPR to 16, and `0` from 16 QPR1; device runs confirm it. `BL_CAPS` lists the tests that
+  came back `ok`.
+- `probe failed (…)`: the probe could not run, or had not finished 100 ms after its fork. Neither
+  variable is set, which the glibc reads as every gated call blocked.
+- `cached` means read from `files/caps.json`; `probed in N ms` (fork included) means it ran.
+
+`perf-report.json` has the same as `device.caps`: `nativeBlock`, `extras` (`BL_CAPS`), each test's
+`state`, `ret`, `errno`, `usable` and `step` (0 set-up, 1 the call under test, 2 on what follows),
+and the page size, kernel, Android release and SDK, security patch and fingerprint it ran on. The
+session's `app.log` has the first line; `droiddeckctl state` has the object as `caps`.
+
 ## On the device (no adb)
 
 1. Install the `DroidDeck-Env-<sha>.apk` from the `droiddeck-env-apk` artifact of the
@@ -91,6 +131,7 @@ report against one without.
 | proot's stop counters | `cache/perf/proot.stats`, from `PROOT_STATS` in proot's own environment. The session's proot only: a terminal's does not get it |
 | fast-path counters | `cache/perf/fastpath/<program>.<pid>`, one per exec, from `PROOT_FP_STATS_DIR` in the guest's environment. The session's processes only |
 | code | `session/SessionPerf.kt` (sampling), `PerfReport.kt` (phases, JSON, summary), `PerfCounters.kt` (readers) |
+| capability probe | `files/caps.json` (this boot's); code in `core/CapProbe.kt` and `app/src/main/cpp/hostsys/` |
 
 - `cache/perf` is emptied whenever a session starts, so no earlier counters reach a report. The raw
   files stay out of the logs; only the two reports go in.
@@ -130,4 +171,7 @@ report against one without.
 - **Host tests:**
   - `tools/proot/bench/host-proot.sh <dir>` builds this repo's proot for the host;
   - `DROIDDECK_HOST_PROOT=<dir> python3 -m unittest discover -s tools/tests -p 'test_proot_stats.py'`
-    runs workloads under it and checks both counter files.
+    runs workloads under it and checks both counter files;
+  - `python3 -m unittest discover -s tools/tests -p 'test_native_capprobe.py'` runs the capability
+    probe under the spike's simulated app filter (`tools/native/launcher/seccomp-launch`), once per
+    profile, and checks that each call comes back blocked or allowed as that profile says.

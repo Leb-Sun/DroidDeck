@@ -135,7 +135,7 @@ mode except the desktop).
 ## State (schema 2)
 
 `state` returns `schema`, `build`, `appVersion`, `runtime {installed, version}`,
-`agent {guest, guestFocus, commands}` and `session`:
+`agent {guest, guestFocus, commands}`, `caps` and `session`:
 
 - `id`, `phase`, `running`, `mode`, `program`, `steamUi`, `steamUrl`, `suspended`, `pip`,
   `firstFrame`, `output` [w, h], `refreshHz`, `lastTransitionAt`, `guestPid`, `installing`
@@ -143,9 +143,13 @@ mode except the desktop).
 - `focus`: gamescope's focus as the guest agent last published it, or null:
   `focusedApp`, `focusedWindow`, `focusableApps`, `baselayerAppIds`, `seq`, `t`.
 
+`caps` is this boot's capability probe, the Performance report's `device.caps`
+(`docs/development/native-env/harness.md`, "Capabilities"), or null before the first session since
+boot.
+
 Phases: `IDLE`, `PREPARING`, `INSTALLING_RUNTIME`, `STARTING_COMPOSITOR`, `STARTING_GUEST`,
 `STARTING_STEAM`, `READY`, `SUSPENDED`, `STOPPING`, `FAILED`. Schema 2 only added `agent` and
-`session.focus`; every schema 1 field is unchanged.
+`session.focus`; every schema 1 field is unchanged. `caps` came later, as an addition to schema 2.
 
 A game the player can see is `focusedApp == appId` **and** `appId in focusableApps`.
 `GAMESCOPE_FOCUSABLE_WINDOWS` is what the Steam client orders the base layer from: a game missing

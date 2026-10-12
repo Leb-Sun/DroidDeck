@@ -28,6 +28,14 @@ its folder.
 
     tools/droiddeck-scenario tools/scenarios/steam-game-focus.json --var appId=489830 --out ./runs
 
+--ab KEY=A,B compares two values of a session preference (03-design.md §6.3): the steps run in
+A B B A order, --repeat times over, each run after `prefs set session KEY <value>` and --cooldown
+seconds (180) after the run before it. The newest performance report is fetched after each run into
+its folder (perf-report.json and .txt, waiting a little for the session's teardown time), with
+ab.json naming the run's arm; tools/perf-compare reads the output folder.
+
+    tools/droiddeck-scenario tools/scenarios/perf-baseline.json --var appId=489830 --ab gameStateHints=false,true --repeat 3
+
 Exit status: 0 when every run passed, 1 when any failed, 2 for a bad scenario or a failed setup.
 """
 
@@ -53,6 +61,35 @@ _loader.exec_module(ctl)
 
 class StepFailed(Exception):
     pass
+
+
+# How long a run's report is waited for once the run is over: its teardown time is written after the
+# session has stopped (session.teardown_done).
+REPORT_WAIT_S = 30
+REPORT_POLL_S = 2
+AB_ORDER = "ABBA"
+
+
+def parse_ab(spec: str, kind: str | None) -> dict:
+    """KEY=A,B, with the preference type --ab-type names or the values suggest."""
+    key, _, values = spec.partition("=")
+    a, _, b = values.partition(",")
+    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]*", key) or not a or not b or a == b or "," in b:
+        raise ValueError(f"--ab wants KEY=A,B with two different values, not {spec!r}")
+    if kind is None:
+        if {a, b} <= {"true", "false"}:
+            kind = "bool"
+        elif all(re.fullmatch(r"-?\d+", v) for v in (a, b)):
+            kind = "int"
+        else:
+            kind = "string"
+    return {"key": key, "a": a, "b": b, "type": kind}
+
+
+def write_text(path: Path, text: str) -> None:
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), "w") as stream:
+        os.fchmod(stream.fileno(), 0o600)
+        stream.write(text)
 
 
 def write_json(path: Path, value) -> None:
@@ -145,6 +182,25 @@ class Runner:
                 entry["seconds"] = round(time.monotonic() - started, 2)
                 log.append(entry)
 
+    def fetch_report(self, folder: Path, previous: str | None) -> dict:
+        """The newest report, into [folder], once it is this run's (not [previous]'s session) and has
+        its teardown time, or REPORT_WAIT_S on."""
+        deadline = time.monotonic() + REPORT_WAIT_S
+        while True:
+            answer = self.ctl(["perf"])
+            report = answer.get("report") if isinstance(answer.get("report"), dict) else {}
+            fresh = answer.get("sessionId") != previous
+            done = report.get("schema") != "droiddeck.perf/2" or report.get("teardownMs") is not None
+            if (fresh and done) or time.monotonic() >= deadline:
+                break
+            time.sleep(REPORT_POLL_S)
+        if not fresh:
+            raise StepFailed(f"no new performance report: the newest is still session {previous}'s")
+        write_text(folder / "perf-report.txt", answer.get("summary") or "")
+        if report:
+            write_json(folder / "perf-report.json", report)
+        return {"sessionId": answer.get("sessionId"), "teardownMs": report.get("teardownMs")}
+
     def evidence(self, folder: Path) -> dict:
         """What a failed run leaves behind: the screen, gamescope's focus, the session's logs."""
         found = {}
@@ -171,7 +227,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--serial")
     parser.add_argument("--package", help="the installed build's package (defaults to DROIDDECK_PACKAGE, then the released app)")
     parser.add_argument("--keep-going", action="store_true", help="run every repeat even after a failure")
+    parser.add_argument("--ab", metavar="KEY=A,B", help="A/B a session preference: A B B A per repeat (03-design.md §6.3)")
+    parser.add_argument("--ab-type", choices=["bool", "int", "string"], help="the preference's type (default: from the values)")
+    parser.add_argument("--cooldown", type=float, default=180, metavar="S", help="seconds between --ab runs (default 180)")
     args = parser.parse_args(argv)
+    try:
+        ab = parse_ab(args.ab, args.ab_type) if args.ab else None
+    except ValueError as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}))
+        return 2
 
     try:
         scenario = json.loads(Path(args.scenario).read_text())
@@ -193,19 +257,31 @@ def main(argv: list[str] | None = None) -> int:
     runner = Runner(adb, serial, out, global_args)
     report = {"name": scenario.get("name"), "serial": serial, "vars": variables, "repeat": repeat,
               "out": str(out), "runs": []}
+    # Without --ab, each run as it is; with it, an arm and its value per run, A B B A per repeat.
+    plan = [(arm, ab[arm.lower()]) for _ in range(repeat) for arm in AB_ORDER] if ab else [(None, None)] * repeat
+    if ab:
+        report["ab"] = dict(ab, cooldown=args.cooldown, order="".join(arm for arm, _ in plan))
 
     status = 0
     setup_log: list = []
+    previous_session = None
+    ended = None
     try:
         runner.run_steps(scenario.get("setup", []), out, setup_log)
-        for run in range(1, repeat + 1):
+        for run, (arm, value) in enumerate(plan, start=1):
+            if ended is not None:
+                rest = args.cooldown - (time.monotonic() - ended)
+                if rest > 0:
+                    print(f"cooling down {rest:.0f} s", file=sys.stderr)
+                    time.sleep(rest)
             folder = out / f"run-{run:02d}"
             folder.mkdir(mode=0o700)
             log: list = []
             started = time.monotonic()
             result = {"run": run, "folder": str(folder)}
+            prefs = [["prefs", "set", "session", ab["key"], value, "--type", ab["type"]]] if ab else []
             try:
-                runner.run_steps(scenario.get("before", []) + scenario.get("steps", []), folder, log)
+                runner.run_steps(prefs + scenario.get("before", []) + scenario.get("steps", []), folder, log)
                 result["ok"] = True
             except StepFailed as exc:
                 result["ok"] = False
@@ -218,10 +294,23 @@ def main(argv: list[str] | None = None) -> int:
             except StepFailed as exc:
                 result["afterError"] = str(exc)
             log.extend({**entry, "after": True} for entry in after)
+            if ab:
+                result["ab"] = {"key": ab["key"], "value": value, "arm": arm, "a": ab["a"], "b": ab["b"]}
+                try:
+                    fetched = runner.fetch_report(folder, previous_session)
+                    previous_session = fetched["sessionId"]
+                    result["report"] = fetched
+                except StepFailed as exc:
+                    result["ok"] = False
+                    result["error"] = result.get("error") or str(exc)
+                    status = 1
+                write_json(folder / "ab.json", dict(result["ab"], ok=result["ok"]))
+                ended = time.monotonic()
             result["seconds"] = round(time.monotonic() - started, 2)
             write_json(folder / "steps.json", log)
             report["runs"].append(result)
-            print(f"run {run}/{repeat}: {'PASS' if result['ok'] else 'FAIL ' + result['error']}", file=sys.stderr)
+            label = f"run {run}/{len(plan)}" + (f" ({arm}: {ab['key']}={value})" if ab else "")
+            print(f"{label}: {'PASS' if result['ok'] else 'FAIL ' + result['error']}", file=sys.stderr)
             if not result["ok"] and not args.keep_going:
                 break
     except StepFailed as exc:

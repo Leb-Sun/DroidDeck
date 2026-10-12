@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Compare performance reports of an A/B run, metric by metric (03-design.md §6.3).
+
+Each argument is a perf-report.json, a run folder (its perf-report.json, or the perf step's answer
+in its steps.json) or a droiddeck-scenario output folder, whose run-* folders are read. Runs are
+grouped by the A/B key: the one --ab set (each run folder's ab.json), else --key, else the one
+toggle whose value differs between the reports.
+
+For each metric it prints A's and B's median and spread (max - min) and the delta of the medians.
+A delta beyond the larger of 5% of A's median and A's spread is a win when it is an improvement;
+on a guarded metric (the times, in-game fps, p99 and power, peak phantoms), a change for the worse
+by the same rule is a regression.
+
+    tools/perf-compare ~/runs/perf-baseline-20261012-140300
+    tools/perf-compare --key gameStateHints a/perf-report.json b/perf-report.json ...
+
+Reads droiddeck.perf/1 and /2 reports; a metric a report lacks is left out of its arm. Exit status:
+0, 1 when a guarded metric regressed, 2 for unusable input.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+import sys
+from pathlib import Path
+
+SCHEMAS = ("droiddeck.perf/1", "droiddeck.perf/2")
+PHASES = [("startup", "startup"), ("ready_to_big_picture", "READY to BP"), ("idle_big_picture", "idle in BP"),
+          ("launch_to_focus", "launch to focus"), ("in_game", "in game")]
+WIN_SHARE = 0.05
+
+
+class InputError(Exception):
+    pass
+
+
+def dig(data, *path):
+    for part in path:
+        if isinstance(data, dict):
+            data = data.get(part)
+        elif isinstance(data, list) and isinstance(part, int):
+            data = data[part] if -len(data) <= part < len(data) else None
+        else:
+            return None
+    return data
+
+
+def phase(report: dict, name: str) -> dict | None:
+    """The phase of that name; with several games, the first."""
+    return next((p for p in report.get("phases") or [] if p.get("name") == name), None)
+
+
+def game_stops(p: dict | None):
+    rates = [t.get("stopsPerSecond") for t in (p or {}).get("tracers") or [] if t.get("role") == "game"]
+    rates = [r for r in rates if isinstance(r, (int, float))]
+    return sum(rates) if rates else None
+
+
+def stutters_per_minute(p: dict | None):
+    stutters, seconds = dig(p, "frames", "stutters"), dig(p, "seconds")
+    return stutters * 60 / seconds if isinstance(stutters, (int, float)) and seconds else None
+
+
+def metrics() -> list[tuple[str, object, str, bool]]:
+    """(label, value of a report, which way is better, guarded)."""
+    rows = [
+        ("READY s", lambda r: dig(r, "times", "readyS"), "lower", True),
+        ("Big Picture s", lambda r: dig(r, "times", "bigPictureS"), "lower", True),
+        ("launch to focus s", lambda r: dig(r, "times", "games", 0, "launchToFocusS"), "lower", True),
+        ("teardown ms", lambda r: r.get("teardownMs"), "lower", True),
+        ("peak phantoms", lambda r: dig(r, "session", "processes", "peakPhantoms"), "lower", True),
+    ]
+    for name, label in PHASES:
+        game = name == "in_game"
+
+        def get(*path, _name=name):
+            return lambda r: dig(phase(r, _name), *path)
+        rows += [
+            (f"{label} traps/s", get("stopsPerSecond"), "lower", False),
+            (f"{label} tracer %", get("tracerPct"), "lower", False),
+            (f"{label} tree %", get("treePct"), "lower", game),
+            (f"{label} fp hit %", get("fastPath", "all", "hitPct"), "higher", False),
+            (f"{label} game t/s", lambda r, _name=name: game_stops(phase(r, _name)), "lower", False),
+            (f"{label} fps", get("frames", "fps"), "higher", game),
+            (f"{label} p95 ms", get("frames", "p95Ms"), "lower", False),
+            (f"{label} p99 ms", get("frames", "p99Ms"), "lower", game),
+            (f"{label} stutters/min", lambda r, _name=name: stutters_per_minute(phase(r, _name)), "lower", False),
+            (f"{label} power mW", get("power", "meanMw"), "lower", game),
+            (f"{label} tree MB", get("rssMb", "sessionTree", "peak"), "lower", False),
+        ]
+    return rows
+
+
+def judge(a: list[float], b: list[float], better: str, guarded: bool) -> dict:
+    a_median, b_median = statistics.median(a), statistics.median(b)
+    a_spread, b_spread = max(a) - min(a), max(b) - min(b)
+    delta = b_median - a_median
+    threshold = max(WIN_SHARE * abs(a_median), a_spread)
+    improved = delta < 0 if better == "lower" else delta > 0
+    verdict = ""
+    if abs(delta) > threshold:
+        if improved:
+            verdict = "win"
+        elif guarded:
+            verdict = "regression"
+    return {"a": {"median": a_median, "spread": a_spread, "n": len(a)},
+            "b": {"median": b_median, "spread": b_spread, "n": len(b)},
+            "delta": delta, "deltaPct": delta / abs(a_median) * 100 if a_median else None,
+            "better": better, "guarded": guarded, "verdict": verdict}
+
+
+def read_json(path: Path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise InputError(f"{path}: {exc}") from exc
+
+
+def report_in_steps(steps) -> dict | None:
+    """The newest perf answer's report among a run's steps (droiddeck-scenario's steps.json)."""
+    for entry in reversed(steps if isinstance(steps, list) else []):
+        result = entry.get("result") if isinstance(entry, dict) else None
+        if isinstance(result, dict) and result.get("command") == "perf" and isinstance(result.get("report"), dict):
+            return result["report"]
+    return None
+
+
+def load(path: Path, ab: dict | None = None) -> list[dict]:
+    """Every run under [path]: {path, report, ab}."""
+    if path.is_file():
+        data = read_json(path)
+        report = report_in_steps(data) if isinstance(data, list) else data
+        return [{"path": str(path), "report": report, "ab": ab}]
+    if not path.is_dir():
+        raise InputError(f"{path}: no such file or folder")
+    runs = sorted(p for p in path.glob("run-*") if p.is_dir())
+    if runs and not (path / "perf-report.json").is_file():
+        scenario = read_json(path / "report.json") if (path / "report.json").is_file() else {}
+        return [run for folder in runs for run in load(folder, (scenario or {}).get("ab"))]
+    run_ab = read_json(path / "ab.json") if (path / "ab.json").is_file() else ab
+    if (path / "perf-report.json").is_file():
+        return [{"path": str(path), "report": read_json(path / "perf-report.json"), "ab": run_ab}]
+    if (path / "steps.json").is_file():
+        return [{"path": str(path), "report": report_in_steps(read_json(path / "steps.json")), "ab": run_ab}]
+    raise InputError(f"{path}: no perf-report.json, steps.json or run folders")
+
+
+def text(value) -> str:
+    if value is None:
+        return "unset"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def group(runs: list[dict], key: str | None, a_value: str | None) -> tuple[str, str, str, dict[str, list[dict]], list[str]]:
+    """The key, A's and B's values, the runs by value, and notes."""
+    notes = []
+    keys = {r["ab"]["key"] for r in runs if isinstance(r["ab"], dict) and r["ab"].get("key")}
+    if key is None and len(keys) == 1:
+        key = keys.pop()
+    if key is None:
+        values = {}
+        for r in runs:
+            for k, v in (r["report"].get("toggles") or {}).items():
+                values.setdefault(k, set()).add(text(v))
+        differing = sorted(k for k, v in values.items() if len(v) > 1 or any(k not in (r["report"].get("toggles") or {}) for r in runs))
+        if len(differing) != 1:
+            raise InputError("cannot tell the A/B key: " + (f"toggles {', '.join(differing)} differ" if differing
+                                                            else "the reports' toggles are the same") + "; pass --key")
+        key = differing[0]
+    by_value: dict[str, list[dict]] = {}
+    order = []
+    for r in runs:
+        ab = r["ab"] if isinstance(r["ab"], dict) and r["ab"].get("key") == key else None
+        toggle = text((r["report"].get("toggles") or {}).get(key))
+        value = text(ab["value"]) if ab and "value" in ab else toggle
+        if ab and "value" in ab and toggle != value:
+            notes.append(f"{r['path']}: set {key}={value}, but the report has {toggle} in effect")
+        if ab and a_value is None and ab.get("a") is not None:
+            a_value = text(ab["a"])
+        if value not in by_value:
+            order.append(value)
+        by_value.setdefault(value, []).append(r)
+    if len(by_value) != 2:
+        raise InputError(f"{key}: {len(by_value)} value(s) among the runs ({', '.join(order)}); an A/B needs two")
+    if a_value is None:
+        a_value = "false" if "false" in by_value else order[0]
+    if a_value not in by_value:
+        raise InputError(f"{key}: no run has A's value {a_value}")
+    b_value = next(v for v in order if v != a_value)
+    return key, a_value, b_value, by_value, notes
+
+
+def compare(runs: list[dict], key: str | None = None, a_value: str | None = None) -> dict:
+    usable, notes = [], []
+    for r in runs:
+        report = r["report"]
+        if not isinstance(report, dict) or report.get("schema") not in SCHEMAS:
+            notes.append(f"{r['path']}: skipped, no {' or '.join(SCHEMAS)} report")
+        elif isinstance(r["ab"], dict) and r["ab"].get("ok") is False:
+            notes.append(f"{r['path']}: skipped, the run failed")
+        else:
+            usable.append(r)
+    if not usable:
+        raise InputError("no usable report")
+    key, a_value, b_value, by_value, more = group(usable, key, a_value)
+    notes += more
+    arms = {"A": by_value[a_value], "B": by_value[b_value]}
+    if min(len(v) for v in arms.values()) < 3:
+        notes.append("fewer than 3 runs in an arm: the spread says little (03-design.md §6.3 asks for 3 pairs or more)")
+    plugged = {dig(p, "power", "plugged") for r in usable for p in r["report"].get("phases") or []} - {None}
+    if len(plugged) > 1:
+        notes.append("some runs were plugged in and some not: power is not comparable")
+    rows = []
+    for label, get, better, guarded in metrics():
+        values = {arm: [v for v in (get(r["report"]) for r in rs) if isinstance(v, (int, float)) and not isinstance(v, bool)]
+                  for arm, rs in arms.items()}
+        if values["A"] and values["B"]:
+            rows.append(dict(judge(values["A"], values["B"], better, guarded), metric=label))
+    return {"key": key, "a": {"value": a_value, "runs": [r["path"] for r in arms["A"]]},
+            "b": {"value": b_value, "runs": [r["path"] for r in arms["B"]]}, "rows": rows, "notes": notes}
+
+
+def fmt(x) -> str:
+    if x is None:
+        return "-"
+    return f"{x:.0f}" if abs(x) >= 1000 else f"{x:.1f}" if abs(x) >= 10 else f"{x:.2f}"
+
+
+def render(result: dict) -> str:
+    lines = [f"A/B {result['key']}: A = {result['a']['value']} ({len(result['a']['runs'])} runs), "
+             f"B = {result['b']['value']} ({len(result['b']['runs'])} runs)",
+             f"{'metric':<28} {'A median':>9} {'A spread':>9} {'B median':>9} {'B spread':>9} {'delta':>9} {'%':>7}  verdict"]
+    for row in result["rows"]:
+        pct = row["deltaPct"]
+        verdict = row["verdict"].upper() if row["verdict"] == "regression" else row["verdict"]
+        lines.append(f"{row['metric']:<28} {fmt(row['a']['median']):>9} {fmt(row['a']['spread']):>9} "
+                     f"{fmt(row['b']['median']):>9} {fmt(row['b']['spread']):>9} {fmt(row['delta']):>9} "
+                     f"{'-' if pct is None else f'{pct:+.1f}':>7}  {verdict}".rstrip())
+    lines += [f"note: {n}" for n in result["notes"]]
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("paths", nargs="+", help="perf-report.json files, run folders or droiddeck-scenario output folders")
+    parser.add_argument("--key", help="the toggle the runs differ in (default: from the runs)")
+    parser.add_argument("--a", dest="a_value", help="A's value of the key (default: --ab's A, else false, else the first seen)")
+    parser.add_argument("--json", action="store_true", help="print the comparison as JSON")
+    args = parser.parse_args(argv)
+    try:
+        runs = [run for p in args.paths for run in load(Path(p).expanduser())]
+        result = compare(runs, args.key, args.a_value)
+    except InputError as exc:
+        print(f"perf-compare: {exc}", file=sys.stderr)
+        return 2
+    sys.stdout.write(json.dumps(result, indent=2) + "\n" if args.json else render(result))
+    return 1 if any(r["verdict"] == "regression" for r in result["rows"]) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

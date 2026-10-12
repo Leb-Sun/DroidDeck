@@ -52,3 +52,7 @@ target_link_libraries(deviceinfo dl)
 # Rebuild Termux terminal-emulator's PTY JNI helper with the app's NDK instead of carrying its
 # prebuilt libtermux.so with a redundant libstdc++.so dependency.
 add_library(termux SHARED termux/termux.c)
+
+# The app's own calls into the kernel (core/HostSys.kt): the capability probe a session start runs
+# in a forked child, to learn what this device's seccomp filter allows (hostsys/capprobe.c).
+add_library(hostsys SHARED hostsys/hostsys.c hostsys/capprobe.c)

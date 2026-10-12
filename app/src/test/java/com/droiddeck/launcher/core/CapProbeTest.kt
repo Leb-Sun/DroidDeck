@@ -121,15 +121,15 @@ class CapProbeTest {
             caps(android15.replace("setresuid allowed ret=0 errno=0 step=1", "setresuid blocked step=1")).status)
     }
 
-    @Test fun blCapsListsWhatIsUsable() {
-        assertEquals(
-            listOf("clone3", "close_range", "landlock", "fp_stub", "execmem", "exec_data", "userfaultfd", "memfd_create",
-                "setresuid", "set_robust_list"),
-            caps(android15).extras,
-        )
-        assertEquals("BL_CAPS=" + caps(android15).extras.joinToString(","), CapProbe.guestEnv(caps(android15))[1])
-        val sixteen = caps(android16q).extras
-        assertTrue(sixteen.containsAll(listOf("openat2", "resolve_in_root", "faccessat2", "fchmodat2")))
+    @Test fun blCapsListsTheUsableExtrasOnly() {
+        assertEquals(listOf("clone3", "close_range", "landlock", "fp_stub"), caps(android15).extras)
+        assertEquals("BL_CAPS=clone3,close_range,landlock,fp_stub", CapProbe.guestEnv(caps(android15))[1])
+        assertEquals(listOf("openat2", "resolve_in_root", "faccessat2", "fchmodat2", "clone3", "close_range", "landlock", "fp_stub"),
+            caps(android16q).extras)
+        // The controls every Android allows are usable, and stay out of BL_CAPS.
+        val controls = caps(android15).results.filter { it.name !in CapProbe.EXTRAS && CapProbe.usable(it) }.map { it.name }
+        assertEquals(listOf("execmem", "exec_data", "userfaultfd", "memfd_create", "setresuid", "set_robust_list"), controls)
+        assertTrue(CapProbe.toJson(caps(android15)).getJSONObject("tests").getJSONObject("setresuid").getBoolean("usable"))
         // Allowed is not usable: uclamp refused by the kernel, a symlink that left the root, a stub that answered wrong.
         val usable = { line: String -> CapProbe.usable(CapProbe.parse("capprobe 1 ok\n$line").second.single()) }
         assertFalse(usable("uclamp allowed ret=-1 errno=95 step=1"))
@@ -172,11 +172,12 @@ class CapProbeTest {
         assertTrue(CapProbe.toJson(caps(null)).isNull("nativeBlock"))
     }
 
-    @Test fun theCacheHoldsForThisBootBuildAndSystemOnly() {
+    @Test fun theCacheHoldsForThisBootInstallAndSystemOnly() {
         val file = temporary.newFile("caps.json")
         val fingerprint = device["fingerprint"] as String
-        CapProbe.write(file, caps(android15), "boot-1")
-        val back = CapProbe.read(file, "boot-1", fingerprint, 12)!!
+        val installed = 1_760_000_000_000L
+        CapProbe.write(file, caps(android15), "boot-1", installed)
+        val back = CapProbe.read(file, "boot-1", fingerprint, 12, installed)!!
         assertTrue(back.cached)
         assertEquals(CapProbe.OK, back.status)
         assertEquals(caps(android15).results, back.results)
@@ -184,13 +185,16 @@ class CapProbeTest {
         assertEquals(21L, back.probeMs)
         assertEquals("15", back.device["android"])
         assertTrue(CapProbe.summary(back)[0], CapProbe.summary(back)[0].endsWith("· cached"))
-        assertNull(CapProbe.read(file, "boot-2", fingerprint, 12))
-        assertNull(CapProbe.read(file, "boot-1", "brand/product/device:16/BP2A/1:user/release-keys", 12))
-        assertNull(CapProbe.read(file, "boot-1", fingerprint, 13))
-        // No boot id to key on: nothing is reused.
-        assertNull(CapProbe.read(file, null, fingerprint, 12))
+        assertNull(CapProbe.read(file, "boot-2", fingerprint, 12, installed))
+        assertNull(CapProbe.read(file, "boot-1", "brand/product/device:16/BP2A/1:user/release-keys", 12, installed))
+        assertNull(CapProbe.read(file, "boot-1", fingerprint, 13, installed))
+        // A test build reinstalled in the same boot has the same version code, and probes again.
+        assertNull(CapProbe.read(file, "boot-1", fingerprint, 12, installed + 60_000))
+        // No boot id or install time to key on: nothing is reused.
+        assertNull(CapProbe.read(file, null, fingerprint, 12, installed))
+        assertNull(CapProbe.read(file, "boot-1", fingerprint, 12, null))
         // A failure is kept too, with its reason.
-        CapProbe.write(file, caps("capprobe 1 timeout\n"), "boot-1")
-        assertEquals("timeout", CapProbe.read(file, "boot-1", fingerprint, 12)!!.status)
+        CapProbe.write(file, caps("capprobe 1 timeout\n"), "boot-1", installed)
+        assertEquals("timeout", CapProbe.read(file, "boot-1", fingerprint, 12, installed)!!.status)
     }
 }

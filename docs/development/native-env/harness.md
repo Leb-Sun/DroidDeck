@@ -37,8 +37,9 @@ which of the calls Android's releases differ on it allows (`core/CapProbe.kt`,
 `app/src/main/cpp/hostsys/capprobe.c`, `03-design.md` §3.3); adb does not run under the app's
 filter, so only the app can ask. Each test runs in a child of its own, so a trapped call kills only
 that child. The answer is kept in `files/caps.json` for the rest of the boot (keyed on the boot id,
-the build fingerprint and the version code), so only the first session after a boot or an update
-pays for the probe: one fork of the app and a few milliseconds. `perf-report.txt` shows it under
+the build fingerprint, the version code and the app's install time, since every test build has the
+same version code), so only the first session after a boot or an install pays for the probe: one
+fork of the app and a few milliseconds. `perf-report.txt` shows it under
 `device`, for example on Android 15:
 
 ```
@@ -59,8 +60,11 @@ caps     seccomp: openat2 blocked, faccessat2 blocked, fchmodat2 blocked, clone3
 - `BL_NATIVE_BLOCK`, in the guest, is the patched glibc's mask (`tools/native/glibc-patches/0001`;
   stock glibc ignores it): `0x1` clone3, `0x2` faccessat2, `0x4` fchmodat2, `0x8` close_range, set
   unless the call came back allowed. By `02` §3 that is `f` up to Android 12, `7` on 13 and 14, `6`
-  on 14 QPR to 16, and `0` from 16 QPR1; device runs confirm it. `BL_CAPS` lists the tests that
-  came back `ok`.
+  on 14 QPR to 16, and `0` from 16 QPR1; device runs confirm it.
+- `BL_CAPS`, also in the guest, lists which of the tests that differ by release or device came back
+  `ok`: `openat2`, `resolve_in_root`, `faccessat2`, `fchmodat2`, `clone3`, `close_range`,
+  `landlock`, `uclamp`, `fp_stub` (`CapProbe.EXTRAS`). The controls every Android allows are in the
+  report only.
 - `probe failed (…)`: the probe could not run, or had not finished 100 ms after its fork. Neither
   variable is set, which the glibc reads as every gated call blocked.
 - `cached` means read from `files/caps.json`; `probed in N ms` (fork included) means it ran.

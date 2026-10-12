@@ -43,8 +43,9 @@ class Caps(
     /** BL_NATIVE_BLOCK; null (unset, the glibc's safe worst case) when the probe did not succeed. */
     val nativeBlock: Int? get() = if (ok) CapProbe.blockMask(results) else null
 
-    /** BL_CAPS: every test that came back usable, in the probe's order. */
-    val extras: List<String> get() = if (ok) results.filter(CapProbe::usable).map { it.name } else emptyList()
+    /** BL_CAPS: the [CapProbe.EXTRAS] that came back usable, in the probe's order. */
+    val extras: List<String> get() =
+        if (ok) results.filter { it.name in CapProbe.EXTRAS && CapProbe.usable(it) }.map { it.name } else emptyList()
 
     fun result(name: String): CapResult? = results.firstOrNull { it.name == name }
 }
@@ -58,9 +59,10 @@ class Caps(
  *    stock glibc ignores it) and BL_CAPS;
  *  - the session's app.log, one line, and the Performance report, as device.caps;
  *  - `droiddeckctl state`, as caps.
- * The probe forks this process (HostSys), so it runs once a boot and build: the result is kept in
- * files/caps.json, keyed on the boot id, the system's build fingerprint and the version code, and
- * every later session start reads it from there.
+ * The probe forks this process (HostSys), so it runs once a boot and install: the result is kept in
+ * files/caps.json, keyed on the boot id, the system's build fingerprint, the version code and the
+ * app's install time (lastUpdateTime: every test build has the same version code), and every later
+ * session start reads it from there.
  */
 object CapProbe {
     private const val TAG = "CapProbe"
@@ -84,6 +86,15 @@ object CapProbe {
      * (03-design.md S4.1).
      */
     val BLOCK_BITS: Map<String, Int> = linkedMapOf("clone3" to 0x1, "faccessat2" to 0x2, "fchmodat2" to 0x4, "close_range" to 0x8)
+
+    /**
+     * What BL_CAPS may name: the tests whose answer differs by Android release or device, the ones a
+     * consumer branches on. The controls every Android allows (setresuid, memfd_create, execmem,
+     * exec_data...) and the calls it always blocks stay in the report only.
+     */
+    val EXTRAS = listOf(
+        "openat2", "resolve_in_root", "faccessat2", "fchmodat2", "clone3", "close_range", "landlock", "uclamp", "fp_stub",
+    )
 
     /** The summary's first line: the calls Android's releases differ on, then uclamp. */
     private val HEADLINE = listOf("openat2", "faccessat2", "fchmodat2", "clone3", "close_range", "landlock")
@@ -110,7 +121,8 @@ object CapProbe {
     fun get(context: Context): Caps {
         val cache = File(context.filesDir, CACHE)
         val bootId = bootId()
-        runCatching { read(cache, bootId, Build.FINGERPRINT, BuildConfig.VERSION_CODE) }
+        val installed = installed(context)
+        runCatching { read(cache, bootId, Build.FINGERPRINT, BuildConfig.VERSION_CODE, installed) }
             .onFailure { Log.w(TAG, "reading ${cache.name}", it) }
             .getOrNull()?.let { return it }
         val started = SystemClock.elapsedRealtime()
@@ -119,13 +131,15 @@ object CapProbe {
         val report = HostSys.probe(dir, TIMEOUT_MS)
         val caps = fromReport(report, deviceFacts(), SystemClock.elapsedRealtime() - started)
         // Kept whatever it found, so a probe that fails costs one session start a boot, not each one.
-        if (report != null && bootId != null) write(cache, caps, bootId)
+        if (report != null && bootId != null && installed != null) write(cache, caps, bootId, installed)
         return caps
     }
 
-    /** What this boot's probe found, without probing; null before the first session since boot. */
+    /** What this boot's probe found, without probing; null before the first session since a boot or install. */
     fun cached(context: Context): Caps? =
-        runCatching { read(File(context.filesDir, CACHE), bootId(), Build.FINGERPRINT, BuildConfig.VERSION_CODE) }.getOrNull()
+        runCatching {
+            read(File(context.filesDir, CACHE), bootId(), Build.FINGERPRINT, BuildConfig.VERSION_CODE, installed(context))
+        }.getOrNull()
 
     /** The guest's BL_NATIVE_BLOCK and BL_CAPS; nothing when the probe failed, which the glibc reads as its worst case. */
     fun guestEnv(caps: Caps): List<String> {
@@ -216,21 +230,26 @@ object CapProbe {
         return json
     }
 
-    /** The probe kept in [file], if it was taken in boot [bootId] by build [versionCode] on system [fingerprint]. */
-    internal fun read(file: File, bootId: String?, fingerprint: String, versionCode: Int): Caps? {
-        if (bootId == null || !file.isFile) return null
+    /**
+     * The probe kept in [file], if it was taken in boot [bootId] on system [fingerprint], by build
+     * [versionCode] as installed at [lastUpdateTime].
+     */
+    internal fun read(file: File, bootId: String?, fingerprint: String, versionCode: Int, lastUpdateTime: Long?): Caps? {
+        if (bootId == null || lastUpdateTime == null || !file.isFile) return null
         val json = JSONObject(file.readText())
         if (json.optString("schema") != SCHEMA || json.optString("bootId") != bootId ||
-            json.optString("fingerprint") != fingerprint || json.optInt("versionCode", -1) != versionCode
+            json.optString("fingerprint") != fingerprint || json.optInt("versionCode", -1) != versionCode ||
+            json.optLong("lastUpdateTime", -1) != lastUpdateTime
         ) return null
         val report = json.opt("report") as? String ?: return null
         val device = DEVICE_KEYS.associateWithTo(LinkedHashMap<String, Any?>()) { k -> json.opt(k)?.takeIf { it != JSONObject.NULL } }
         return Caps(json.getString("probe"), parse(report).second, device, json.optLong("probeMs"), report, cached = true)
     }
 
-    internal fun write(file: File, caps: Caps, bootId: String) {
+    internal fun write(file: File, caps: Caps, bootId: String, lastUpdateTime: Long) {
         try {
-            val json = toJson(caps).put("bootId", bootId).put("report", caps.report ?: JSONObject.NULL)
+            val json = toJson(caps).put("bootId", bootId).put("lastUpdateTime", lastUpdateTime)
+                .put("report", caps.report ?: JSONObject.NULL)
             val staged = File(file.parentFile, ".${file.name}.tmp")
             staged.writeText(json.toString(1))
             if (!staged.renameTo(file)) staged.delete()
@@ -269,6 +288,10 @@ object CapProbe {
             Os.symlink("/inside", link.path)
         }
     }
+
+    /** When this build was installed; null where it cannot be read, and then nothing is kept. */
+    private fun installed(context: Context): Long? =
+        runCatching { context.packageManager.getPackageInfo(context.packageName, 0).lastUpdateTime }.getOrNull()
 
     /** This boot's id; null where it cannot be read, and then nothing is kept. */
     private fun bootId(): String? =

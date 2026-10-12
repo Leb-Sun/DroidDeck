@@ -86,7 +86,7 @@ new file mode 100644
 index 00000000..5905a3de
 --- /dev/null
 +++ b/sysdeps/unix/sysv/linux/bl-seccomp.h
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,53 @@
 +/* DroidDeck native mode: runtime gate for Android-blocked syscalls.
 +
 +   Android's app seccomp policy answers a fixed set of syscalls with SIGSYS.
@@ -110,6 +110,9 @@ index 00000000..5905a3de
 +
 +#ifndef _BL_SECCOMP_H
 +#define _BL_SECCOMP_H 1
++
++/* __glibc_unlikely; do not rely on what an includer pulled in first.  */
++#include <sys/cdefs.h>
 +
 +#define BL_BLK_CLONE3     0x1
 +#define BL_BLK_FACCESSAT2 0x2

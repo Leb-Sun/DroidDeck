@@ -51,7 +51,7 @@ index 5905a3de..eb91648e 100644
  
     rseq and set_robust_list are blocked on *every* Android 10-17, so they are
     skipped unconditionally elsewhere and are not represented here.
-@@ -25,7 +26,9 @@
+@@ -28,7 +29,9 @@
  #define BL_BLK_CLONE3     0x1
  #define BL_BLK_FACCESSAT2 0x2
  #define BL_BLK_FCHMODAT2  0x4

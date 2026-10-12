@@ -532,6 +532,8 @@
     <string name="perf_fastpath">proot fast path</string>
     <string name="perf_fastpath_needs_seccomp">Needs proot\'s seccomp filter.</string>
     <string name="perf_fastpath_hint">Faster file lookups and less stutter. Turn off if a program can\'t find its files.</string>
+    <string name="perf_exitkill">proot exit kill</string>
+    <string name="perf_exitkill_hint">If Android kills proot, the session\'s programs end with it instead of running on, and stopping a session no longer waits on proot. Applies next session.</string>
     <string name="perf_measure">Measurement</string>
     <string name="perf_report">Performance report</string>
     <string name="perf_report_hint">Counts proot\'s traps, its CPU time and the fast path\'s hits through each session, into perf-report.txt in the session\'s logs. Off, nothing is counted.</string>

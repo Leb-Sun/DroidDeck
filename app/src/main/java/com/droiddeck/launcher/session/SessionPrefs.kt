@@ -398,6 +398,17 @@ object SessionPrefs {
     }
 
     /**
+     * Whether a session's proot takes its tracees with it however it dies (PROOT_EXIT_KILL=1, proot
+     * patch 0016), and a stop asks it to quit with SIGQUIT instead of a SIGTERM it ignores. Off by
+     * default until a device run shows no regression.
+     */
+    fun prootExitKill(context: Context): Boolean = prefs(context).getBoolean("prootExitKill", false)
+
+    fun setProotExitKill(context: Context, on: Boolean) {
+        prefs(context).edit().putBoolean("prootExitKill", on).apply()
+    }
+
+    /**
      * Whether sessions write a performance report (SessionPerf): proot's stops, the tracer's CPU and
      * the fast path's hits through each phase, into perf-report.txt and .json in the session's logs.
      * Off by default, and off nothing is counted.

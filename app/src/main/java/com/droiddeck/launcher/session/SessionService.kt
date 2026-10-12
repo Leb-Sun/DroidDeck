@@ -477,6 +477,11 @@ class SessionService : Service() {
             hostEnv["PROOT_NO_SECCOMP"] = "1"
             Log.i(TAG, "proot: seccomp acceleration off by request")
         }
+        // Patch 0016: the kernel kills every tracee when proot dies, even by SIGKILL (see teardown).
+        if (SessionPrefs.prootExitKill(this)) {
+            hostEnv["PROOT_EXIT_KILL"] = "1"
+            Log.i(TAG, "proot: exit kill on")
+        }
         fastPathKey?.let { ProotFastPath.hostEnv(it).let { (k, v) -> hostEnv[k] = v } }
         val prootLibs = LinuxRuntime.prootLibraryPath(this)
         if (prootLibs.isNotEmpty()) hostEnv["LD_LIBRARY_PATH"] = prootLibs
@@ -995,15 +1000,22 @@ class SessionService : Service() {
         return binds
     }
 
-    private fun teardown(prootPid: Int, expectedStartTime: Long? = null) {
+    /** Returns what it stopped, as (pid, start time): proot, then the tree it had. */
+    private fun teardown(prootPid: Int, expectedStartTime: Long? = null): List<Pair<Int, Long>> {
         fun stillSameProcess(): Boolean = expectedStartTime == null || readStat(prootPid)?.second == expectedStartTime
-        if (!stillSameProcess()) return
+        if (!stillSameProcess()) return emptyList()
         val tree = descendants(prootPid)
-        if (!stillSameProcess()) return
-        android.os.Process.sendSignal(prootPid, 15) // SIGTERM
+        val prootStarted = readStat(prootPid)?.second
+        if (!stillSameProcess()) return emptyList()
+        val stopped = listOfNotNull(prootStarted?.let { Pair(prootPid, it) }) + tree
+        // proot ignores SIGTERM, so a live tree always waited out the grace and then lost its tracer
+        // to the SIGKILL. With proot exit kill (Performance), SIGQUIT: proot kills every tracee
+        // itself and leaves through its own event loop. SIGKILL stays the backstop.
+        val quit = SessionPrefs.prootExitKill(this)
+        android.os.Process.sendSignal(prootPid, if (quit) 3 else 15) // SIGQUIT, SIGTERM
         if (!waitForExit(prootPid, GRACE_MS)) {
-            if (!stillSameProcess()) return
-            Log.w(TAG, "proot $prootPid did not exit on SIGTERM; killing it")
+            if (!stillSameProcess()) return stopped
+            Log.w(TAG, "proot $prootPid did not exit on ${if (quit) "SIGQUIT" else "SIGTERM"}; killing it")
             android.os.Process.killProcess(prootPid)
         }
         var killed = 0
@@ -1014,6 +1026,39 @@ class SessionService : Service() {
             killed++
         }
         if (killed > 0) Log.i(TAG, "swept $killed process(es) proot left behind")
+        return stopped
+    }
+
+    /**
+     * session.teardown_done: `elapsedMs` from the stop (session.stopping) until every process the stop
+     * signalled is gone, the performance report's teardownMs. Runs once the stop has finished, so the
+     * wait never holds it up. A zombie counts as gone; `left` is what outlived [TEARDOWN_WAIT_MS].
+     * Into the ended session's folder [dir] (none without one), and named in the fields too: a new
+     * session may have begun by then.
+     */
+    private fun recordTeardownDone(stoppingAt: Long, stopped: List<Pair<Int, Long>>, dir: File?) {
+        if (dir == null) return
+        val deadline = android.os.SystemClock.elapsedRealtime() + TEARDOWN_WAIT_MS
+        var left = stopped
+        while (true) {
+            left = left.filter { (pid, started) -> running(pid, started) }
+            if (left.isEmpty() || android.os.SystemClock.elapsedRealtime() >= deadline) break
+            try { Thread.sleep(10) } catch (e: InterruptedException) { break }
+        }
+        SessionEvents.record("session.teardown_done", mapOf(
+            "sessionId" to dir.name,
+            "elapsedMs" to android.os.SystemClock.elapsedRealtime() - stoppingAt,
+            "processes" to stopped.size,
+            "left" to left.size,
+            "prootExitKill" to SessionPrefs.prootExitKill(this),
+        ), dir)
+    }
+
+    /** Whether the process [pid] that started at [started] still runs: there, the same one, not a zombie. */
+    private fun running(pid: Int, started: Long): Boolean {
+        val stat = try { File("/proc/$pid/stat").readText() } catch (e: Exception) { return false }
+        val fields = stat.substringAfterLast(')').trim().split(Regex("\\s+"))
+        return fields.size >= 20 && fields[0] != "Z" && fields[0] != "X" && fields[19].toLongOrNull() == started
     }
 
     /** Every process under [root], as (pid, start time), from a single walk of /proc. */
@@ -1166,21 +1211,23 @@ class SessionService : Service() {
      * seccomp filter, with no tracer left, answers ENOSYS - survives both, reparented to init,
      * and wrote 9 GB of one line into the session log before anything killed it.
      */
-    private fun killGuestLeftovers() {
+    private fun killGuestLeftovers(): List<Pair<Int, Long>> {
         val me = android.os.Process.myPid()
-        val rootfs = try { File(filesDir, "linuxfs").canonicalPath } catch (e: Exception) { return } + "/"
-        val procs = File("/proc").listFiles { f -> f.name.all { it.isDigit() } } ?: return
-        var killed = 0
+        val rootfs = try { File(filesDir, "linuxfs").canonicalPath } catch (e: Exception) { return emptyList() } + "/"
+        val procs = File("/proc").listFiles { f -> f.name.all { it.isDigit() } } ?: return emptyList()
+        val killed = ArrayList<Pair<Int, Long>>()
         for (proc in procs) {
             val pid = proc.name.toIntOrNull() ?: continue
             if (pid == me) continue
             // Another uid's exe is not ours to read; a process already gone has none.
             val exe = try { File(proc, "exe").canonicalPath } catch (e: Exception) { continue }
             if (!exe.startsWith(rootfs)) continue
+            val started = readStat(pid)?.second
             android.os.Process.killProcess(pid)
-            killed++
+            if (started != null) killed.add(Pair(pid, started))
         }
-        if (killed > 0) Log.w(TAG, "killed $killed guest process(es) proot no longer tracked")
+        if (killed.isNotEmpty()) Log.w(TAG, "killed ${killed.size} guest process(es) proot no longer tracked")
+        return killed
     }
 
     private fun killStragglers() {
@@ -1562,6 +1609,7 @@ class SessionService : Service() {
         SessionEvents.record("guest.exited", mapOf("status" to status))
         GpuClockPin.stop(this)
         SessionEvents.transition(SessionPhase.STOPPING, "session.stopping", mapOf("status" to status))
+        val stoppingAt = android.os.SystemClock.elapsedRealtime()
         suspendOperationPending = false
         launchWatcher?.stopWatching()
         launchWatcher = null
@@ -1570,10 +1618,10 @@ class SessionService : Service() {
         // proot's --kill-on-exit takes the guest tree down only if proot gets to run it, and
         // SIGKILL never lets it. A SIGKILLed proot left its tracees alive with no tracer: every
         // seccomp-trapped syscall then failed with ENOSYS, they spun on retries at a full core
-        // for over an hour, and the reaper could not even open /proc to kill them. So: SIGTERM,
-        // a grace for proot's own cleanup, SIGKILL only if it will not go, then a sweep of the
-        // tree it had - snapshotted first, each pid checked against its start time so a number
-        // reused by a new process is never touched.
+        // for over an hour, and the reaper could not even open /proc to kill them. So: SIGTERM
+        // (SIGQUIT with proot exit kill, see teardown), a grace for proot's own cleanup, SIGKILL
+        // only if it will not go, then a sweep of the tree it had - snapshotted first, each pid
+        // checked against its start time so a number reused by a new process is never touched.
         val prootPid = sessionPid
         sessionPid = -1
         val auxiliary = synchronized(auxiliaryProcessesLock) {
@@ -1603,11 +1651,13 @@ class SessionService : Service() {
         val finishAfterTeardown: () -> Unit = {
             if (prootPid > 1 || auxiliary.isNotEmpty()) {
                 Thread({
+                    val stopped = ArrayList<Pair<Int, Long>>()
                     if (prootPid > 1 && steamClientMayRun) askSteamToExit(prootPid)
-                    auxiliary.forEach { (pid, started) -> teardown(pid, started) }
-                    if (prootPid > 1) teardown(prootPid)
-                    killGuestLeftovers()
+                    auxiliary.forEach { (pid, started) -> stopped += teardown(pid, started) }
+                    if (prootPid > 1) stopped += teardown(prootPid)
+                    stopped += killGuestLeftovers()
                     finishSessionStop(status, stoppedGen)
+                    recordTeardownDone(stoppingAt, stopped, ended)
                 }, "session-teardown").start()
             } else {
                 finishSessionStop(status, stoppedGen)
@@ -1853,6 +1903,8 @@ class SessionService : Service() {
             "steamwebhelper", "linuxfs/opt/android-host/proot", "/libproot.so", "pulseaudio/libpulseaudio.so")
         /** How long proot gets to run its own cleanup before it is killed outright. */
         private const val GRACE_MS = 1200L
+        /** How long session.teardown_done waits for the processes the stop signalled to be gone. */
+        private const val TEARDOWN_WAIT_MS = 5_000L
         /** The performance report's last read, at the end milestone: thousands of small files at most. */
         private const val PERF_END_WAIT_MS = 10_000L
         private const val STEAM_PICKUP_MS = 1500L

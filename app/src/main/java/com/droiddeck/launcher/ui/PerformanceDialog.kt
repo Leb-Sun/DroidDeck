@@ -46,6 +46,7 @@ fun PerformancePage(
     gpuClockPin: Boolean,
     prootNoSeccomp: Boolean,
     prootFastPath: Boolean,
+    prootExitKill: Boolean,
     perfReport: Boolean,
     guestHostname: String,
     phantomWarning: String?,
@@ -62,6 +63,7 @@ fun PerformancePage(
     onGpuClockPin: (Boolean) -> Unit,
     onProotNoSeccomp: (Boolean) -> Unit,
     onProotFastPath: (Boolean) -> Unit,
+    onProotExitKill: (Boolean) -> Unit,
     onPerfReport: (Boolean) -> Unit,
     onCopyPerfReport: () -> Unit,
     onGuestHostname: (String) -> Unit,
@@ -160,6 +162,11 @@ fun PerformancePage(
                 if (prootNoSeccomp) stringResource(R.string.perf_fastpath_needs_seccomp)
                 else stringResource(R.string.perf_fastpath_hint),
                 prootFastPath && !prootNoSeccomp, enabled = !prootNoSeccomp, onChange = onProotFastPath,
+            )
+            ToggleRow(
+                host, "exitkill", stringResource(R.string.perf_exitkill),
+                stringResource(R.string.perf_exitkill_hint),
+                prootExitKill, onChange = onProotExitKill,
             )
         }
         SettingsGroup(stringResource(R.string.perf_measure)) {

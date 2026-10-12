@@ -3,7 +3,8 @@ run-name: ${{ github.event_name == 'pull_request' && format('building pr {0} on 
 
 on:
   push:
-    branches: [ main ]
+    # Environment-work: the native-environment experiment (docs/development/native-env/PLAN.md).
+    branches: [ main, Environment-work ]
     paths-ignore:
       - '**/*.md'
       - 'LICENSE'
@@ -455,10 +456,11 @@ jobs:
         env:
           DROIDDECK_BUILD_LABEL: ${{ steps.build-label.outputs.label }}
           SGDB_API_KEY: ${{ secrets.SGDB_API_KEY }}
+          APP_LABEL: ${{ github.ref == 'refs/heads/Environment-work' && 'DroidDeck Env' || '' }}
         run: |
           set -o pipefail
           python3 tools/release/runtime_inputs.py record
-          ./gradlew assembleRelease --console=plain -PndkVersion="$NDK_VERSION" 2>&1 | tee /tmp/build.log
+          ./gradlew assembleRelease --console=plain -PndkVersion="$NDK_VERSION" ${APP_LABEL:+"-PappLabel=$APP_LABEL"} 2>&1 | tee /tmp/build.log
           python3 tools/release/check_session_assets.py app/build/outputs/apk/release/app-release.apk
           python3 tools/release/runtime_inputs.py apk app/build/outputs/apk/release/app-release.apk
 
@@ -599,6 +601,49 @@ jobs:
         with:
           name: droiddeck-apk
           path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      # Environment-work builds install beside the released app instead of over it: the package
+      # is renamed the way tools/release/sign-apk.sh makes its variants, and the apk keeps the
+      # public testkey (a fork has no release key). Its own data, runtime and Steam sign-in; the
+      # updater offers it nothing, since no catalog lists the package.
+      - name: Environment-work test apk (com.droiddeck.env, beside the released app)
+        if: github.ref == 'refs/heads/Environment-work'
+        run: |
+          set -euo pipefail
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n1)
+          P=com.droiddeck.launcher N=com.droiddeck.env
+          w=$(mktemp -d)
+          python3 tools/release/axml_rename.py app/build/outputs/apk/release/app-release.apk "$w/renamed.apk" \
+            "$P=$N" "$P.androidx-startup=$N.androidx-startup" "$P.logs=$N.logs" \
+            "$P.documents=$N.documents" "$P.home=$N.home" "$P.agent=$N.agent" \
+            "$P.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION=$N.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+          got=$("$BT/aapt" dump badging "$w/renamed.apk" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+          [ "$got" = "$N" ] || { echo "::error::the apk says package '$got', not '$N'"; exit 1; }
+          if "$BT/aapt" dump xmltree "$w/renamed.apk" AndroidManifest.xml \
+              | grep -E 'android:(authorities|taskAffinity)' | grep -F "\"$P."; then
+            echo "::error::the manifest still names $P in an authority or task"; exit 1
+          fi
+          "$BT/zipalign" -p -f 4 "$w/renamed.apk" "$w/aligned.apk"
+          mkdir -p env-out
+          out="env-out/DroidDeck-Env-${GITHUB_SHA::7}.apk"
+          TESTKEY_PASSWORD=android "$BT/apksigner" sign \
+            --ks keystore/testkey.p12 --ks-type PKCS12 --ks-pass env:TESTKEY_PASSWORD \
+            --ks-key-alias testkey --key-pass env:TESTKEY_PASSWORD \
+            --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+            --v4-signing-enabled false --out "$out" "$w/aligned.apk"
+          rm -f "$out.idsig"
+          "$BT/apksigner" verify --min-sdk-version 26 "$out"
+          ( cd env-out && sha256sum -- *.apk | tee SHA256SUMS.txt )
+          echo "- \`$(basename "$out")\` (installs as $N, beside DroidDeck)" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: github.ref == 'refs/heads/Environment-work'
+        with:
+          name: droiddeck-env-apk
+          path: env-out/*
           if-no-files-found: error
           retention-days: 30
           compression-level: 0

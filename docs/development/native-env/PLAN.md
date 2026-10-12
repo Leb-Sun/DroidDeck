@@ -49,6 +49,21 @@ What remains is mostly structural:
   write device scripts. Device numbers come from runs on real hardware. Every claim is labelled
   *measured* (where, how) or *inferred*.
 
+## Testing on the device
+
+- **The build.** Every push to `Environment-work` that changes more than Markdown runs `Build APK`
+  in GitHub Actions on `Leb-Sun/DroidDeck`.
+- **The download.** The run's `droiddeck-env-apk` artifact holds `DroidDeck-Env-<sha>.apk`.
+- **How it installs.** As **DroidDeck Env** (`com.droiddeck.env`), beside the released app:
+  - it is signed with the public AOSP testkey (a fork has no release key), and the package is
+    renamed the way `tools/release/sign-apk.sh` makes its variants;
+  - it keeps its own data, runtime and Steam sign-in;
+  - the updater offers it nothing, since no catalog lists the package.
+- **A/B within one install.** New mechanisms sit behind toggles. The baseline is the same build
+  with the toggles off, so a comparison never mixes packages, runtimes or signatures.
+- **Over adb.** `tools/droiddeckctl` hardcodes `com.droiddeck.launcher` and needs a package option
+  before it can drive the test app.
+
 ## Phases and gates
 
 | phase | work | output | gate |
@@ -90,6 +105,8 @@ What remains is mostly structural:
 | 2026-10-11 | Build on the existing proot work rather than start over | The measured analysis and the fast path are the strongest base. The fastest route to "more native" is to keep pulling work out of the tracer until it becomes optional. |
 | 2026-10-11 | One work branch, `Environment-work`; `main` untouched | The owner keeps `main` as the upstream sync point. |
 | 2026-10-11 | The owner authors, Claude commits and signs | Commits are credited to the owner and show as Verified; this environment signs only Claude-committed commits. |
+| 2026-10-12 | No AI `Co-authored-by` trailers from here on | Upstream's `Build APK` rejects them on pull requests ("Check co-authors"), and the owner wants commits as their own. |
+| 2026-10-12 | Test builds install beside the released app, as `com.droiddeck.env` | The owner tests on their own device and keeps their daily install; a fork cannot sign with the release key, so a test build could never update it anyway. |
 | 2026-10-11 | At most two agents at a time | Keeps usage even and keeps each step reviewable. |
 
 ## Documents

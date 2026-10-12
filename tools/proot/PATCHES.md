@@ -110,3 +110,19 @@ Measurement (inert unless `PROOT_STATS` is set; see `docs/development/native-env
   the order above, then 16 `u64` ns. After the header, one `{u64 enter, exit, emulated, ns}` per
   syscall in proot's numbering, then each syscall's name in a field of the name size. Host test:
   `tools/tests/test_proot_stats.py` with a proot from `bench/host-proot.sh`.
+
+Supervision (inert unless `PROOT_EXIT_KILL` is set; see `docs/development/native-env/03-design.md`
+§2.1):
+
+- `0016-exit-kill.patch` - `--kill-on-exit` takes the tracees down only when proot gets to run its
+  own cleanup, and `SIGKILL` never lets it: a proot killed by Android, the low memory killer or the
+  app left every tracee running with no tracer, where each syscall the seccomp filter traces fails
+  with ENOSYS. With `PROOT_EXIT_KILL` in proot's environment and `--kill-on-exit`, the options proot
+  sets on its first tracee include `PTRACE_O_EXITKILL` (Linux 3.8+), so the kernel kills every
+  tracee when proot exits, however it exits. That `PTRACE_SETOPTIONS` is proot's only one: the kernel
+  attaches each new tracee (fork, vfork, clone) with its parent's options, this one included.
+  Without the variable the options are today's. The app sets it with Performance > proot exit kill
+  (`prootExitKill`), which also stops a session's proot with `SIGQUIT`: proot ignores `SIGTERM`, and
+  on `SIGQUIT` it kills every tracee itself and leaves through its event loop (`event.c`,
+  `kill_all_tracees2`). Host test: `tools/tests/test_proot_exitkill.py`; against 0001-0015 its five
+  tracees outlive a `SIGKILL`ed proot, with 0016 none does.

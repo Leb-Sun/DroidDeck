@@ -1,0 +1,73 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: DroidDeck <droiddeck@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 00:00:00 +0000
+Subject: [PATCH] event: with PROOT_EXIT_KILL and --kill-on-exit, tracees die
+ with the tracer
+
+--kill-on-exit takes the tracees down only when PRoot gets to run its own
+cleanup, and SIGKILL never lets it: a PRoot killed by Android, the low
+memory killer or its parent left every tracee running with no tracer, where
+each syscall its seccomp filter traces fails with ENOSYS. With
+PROOT_EXIT_KILL in PRoot's environment (and only then), the options PRoot
+sets on its first tracee include PTRACE_O_EXITKILL, so the kernel kills
+every tracee when PRoot exits, however it exits. That is the only
+PTRACE_SETOPTIONS PRoot issues: each new tracee (fork, vfork, clone) is
+attached by the kernel with its parent's options, this one included.
+---
+ src/compat.h       |  3 +++
+ src/tracee/event.c | 16 ++++++++++++++--
+ 2 files changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/src/compat.h b/src/compat.h
+index f69bc3f..2cad041 100644
+--- a/src/compat.h
++++ b/src/compat.h
+@@ -135,6 +135,9 @@
+ #    ifndef PTRACE_O_TRACESECCOMP
+ #        define PTRACE_O_TRACESECCOMP	0x00000080
+ #    endif
++#    ifndef PTRACE_O_EXITKILL
++#        define PTRACE_O_EXITKILL	0x00100000
++#    endif
+ #    ifndef PTRACE_EVENT_FORK
+ #        define PTRACE_EVENT_FORK	1
+ #    endif
+diff --git a/src/tracee/event.c b/src/tracee/event.c
+index c8f7801..0872955 100644
+--- a/src/tracee/event.c
++++ b/src/tracee/event.c
+@@ -467,6 +467,7 @@ int handle_tracee_event(Tracee *tracee,
+ 				PTRACE_O_TRACEEXEC	|
+ 				PTRACE_O_TRACECLONE	|
+ 				PTRACE_O_TRACEEXIT);
++			unsigned long exit_kill = 0;
+ 
+ 			/* Distinguish some events from others and
+ 			 * automatically trace each new process with
+@@ -481,13 +482,24 @@ int handle_tracee_event(Tracee *tracee,
+ 
+ 			deliver_sigtrap = true;
+ 
++			/* PROOT_EXIT_KILL, with --kill-on-exit: the kernel
++			 * kills every tracee when PRoot exits, even when
++			 * PRoot itself is SIGKILLed and never gets to, so
++			 * none is left running untraced.  This is the only
++			 * place the options are set, on the first tracee:
++			 * the kernel attaches each new one (fork, vfork,
++			 * clone) with its parent's options, this one
++			 * included.  */
++			if (tracee->killall_on_exit && getenv("PROOT_EXIT_KILL") != NULL)
++				exit_kill = PTRACE_O_EXITKILL;
++
+ 			/* Try to enable seccomp mode 2...  */
+ 			status = ptrace(PTRACE_SETOPTIONS, tracee->pid, NULL,
+-					default_ptrace_options | PTRACE_O_TRACESECCOMP);
++					default_ptrace_options | exit_kill | PTRACE_O_TRACESECCOMP);
+ 			if (status < 0) {
+ 				/* ... otherwise use default options only.  */
+ 				status = ptrace(PTRACE_SETOPTIONS, tracee->pid, NULL,
+-						default_ptrace_options);
++						default_ptrace_options | exit_kill);
+ 				if (status < 0) {
+ 					note(tracee, ERROR, SYSTEM, "ptrace(PTRACE_SETOPTIONS)");
+ 					exit(EXIT_FAILURE);

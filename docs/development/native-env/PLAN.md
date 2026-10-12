@@ -74,30 +74,38 @@ What remains is mostly structural:
 | 3. Build | one milestone at a time, implementer then independent reviewer, each behind a toggle | code, tests, notes in this folder | each milestone has to pass host tests and review |
 | 4. Validate | device A/B harness on `droiddeckctl` and `tools/proot/bench`, runs on hardware | `05-results.md` | a mechanism's toggle defaults on only after it wins on a device |
 
-## Candidate directions (decided at Gate 1)
+## Direction (Gate 1, 2026-10-12)
 
-- **A. Widen the fast path.**
-  - Cover the write family.
-  - Hook `syscall()` for FEX.
-  - Fold it into `libblsession.so`.
-  - Set `GLIBC_TUNABLES`.
-  - Give the game tree a second tracer.
+**proot as the safety net, native wherever it can be, with the app as the container.** This is
+rank 1 in `02` §9.1, and it matches `01` §8. Each layer is useful on its own. Each one leaves
+proot's job smaller, until proot is attached only to the process trees that still need it.
 
-  Incremental and low risk.
-- **B. Proot-aware guest glibc.** Rebuild the rootfs's own glibc:
-  - route its internal path entry points (ld.so, fts, realpath, nss) through in-process
-    translation;
-  - never issue Android-blocked syscalls, which ends the `SIGSYS` round trips.
-- **C. Tracer-optional native mode.**
-  - In-process translation covers enough that most processes run untraced.
-  - `exec` goes through a userspace loader.
-  - proot becomes a fallback, attached only to processes that need it.
-- **D. New interception technology.** Systrap-style in-process `SIGSYS`, Syscall User Dispatch,
-  binary rewriting: whatever Phase 1 shows is available to apps on arm64 Android.
-- **E. The app as the container.** The Android app prepares binds and fake `/proc` and `/sys`
-  files, and owns process lifetime and scheduling for the environment. It complements B and C.
-- **Expected to be ruled out:** a VM through the Android Virtualization Framework. A third-party
-  app is unlikely to get access, and a VM loses direct KGSL. Phase 1 confirms or overturns this.
+| layer | what | why it pays |
+|---|---|---|
+| **1. App as the container** | The Android app owns the environment: binds and stand-in files (already done), process supervision, and the game tree's proot started from a separate `:game` Android process. Also ADPF hint sessions for gamescope and game threads, `setGameState(loading)`, and a uclamp trial. It detects the phantom-process limit and Android 17's MemoryLimiter | A second tracer measured 2.5× the trap throughput, so Steam/CEF bursts stop stalling a game load. It gives the game its own process state and memory budget, and Android's supported CPU boosts |
+| **2. In-process first** | Fold the fast path into `libblsession.so`. Apply `libblaudit` session-wide. Probe the app seccomp filter at session start, in a forked child, and use `openat2(RESOLVE_IN_ROOT)` where Android 16 QPR1+ allows it | Fewer libraries per exec, fewer `ld.so` misses, and kernel-exact path resolution on new devices |
+| **3. proot-aware glibc** | Rebuild the rootfs's glibc (same version as Arch's): it never issues Android-blocked syscalls, and its internal path entry points (`ld.so`, fts, realpath, nss, `posix_spawn`) translate in-process | Removes the `ld.so` and libc-internal traps that dominate exec, and makes an untraced process *possible*: stock glibc dies on `set_robust_list`/`rseq` before any preload runs |
+| **4. Native mode** | Processes run with no tracer. `exec` goes through an exec shim to the rootfs's `ld.so`, or a loader in the native-library directory so it survives a targetSdk bump. `/proc/self/exe` is emulated in-process. Start with the Steam client and CEF tree, the largest exec and path load at startup; proot stays the net for the game tree and anything unusual (static binaries, raw `svc`) | Startup and the Steam UI leave the tracer entirely. steamclienttermux measured 7× faster Runtime-to-first-window natively, against a slower proot than ours |
+
+**Ruled out at Gate 1:**
+- **Kernel containers** (user and mount namespaces, chroot, FUSE, fanotify): closed in GKI and the
+  app seccomp filter.
+- **Syscall User Dispatch:** no arm64 kernel has it.
+- **seccomp user notification:** no faster than ptrace.
+- **memfd exec:** SELinux denies it at every targetSdk.
+- **A VM through AVF:** needs adb, mostly absent on Snapdragon, no KGSL.
+- **A full in-process interception runtime** (systrap-style `SIGSYS` everywhere): signal
+  virtualisation across glibc, Wine and CEF is fragile, and filters persist across exec.
+- **Bionic-native Wine:** a different product, not Valve's Linux client and Proton.
+
+**Held constant:** targetSdk 28. Every new exec path must also work from the native-library
+directory, so a targetSdk bump stays possible.
+
+**Out of scope:** 16 KB-page devices threaten FEX and ARM64EC whatever the environment, and are
+tracked apart.
+
+**Data before Gate 2:** a baseline from the owner's device through the harness (`harness.md`)
+decides which layer goes first, and what "faster" means in numbers.
 
 ## Decision log
 
@@ -109,6 +117,8 @@ What remains is mostly structural:
 | 2026-10-12 | No AI `Co-authored-by` trailers from here on | Upstream's `Build APK` rejects them on pull requests ("Check co-authors"), and the owner wants commits as their own. |
 | 2026-10-12 | Test builds install beside the released app, as `com.droiddeck.env` | The owner tests on their own device and keeps their daily install; a fork cannot sign with the release key, so a test build could never update it anyway. |
 | 2026-10-11 | At most two agents at a time | Keeps usage even and keeps each step reviewable. |
+| 2026-10-12 | Build a measurement harness before any change | `01` found no device numbers for a real session (traps per second, tracer CPU, hit rates, load times); nothing could be shown to help without them. |
+| 2026-10-12 | **Gate 1:** proot as the safety net, native wherever it can be, with the app as the container (four layers, above) | Both Phase 1 reports converge on it. It is the only direction that is low-risk at every step (each miss falls back to proot), works at any targetSdk, and still ends with untraced processes. |
 
 ## Documents
 
@@ -117,3 +127,5 @@ What remains is mostly structural:
   load-bearing (Phase 1).
 - `02-landscape-and-constraints.md`: other projects, interception technology, and the limits
   Android puts on a non-root app (Phase 1).
+- `harness.md`: how to take a baseline on the device (Phase 1, in progress).
+- `03-design.md`, `04-spikes.md`: the layered design and its feasibility spikes (Phase 2).

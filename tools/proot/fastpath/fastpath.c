@@ -150,7 +150,8 @@ static long fp_open(int dirfd, const char *path, int flags, mode_t mode);
 
 /* A call left to proot. Opened for each line: a program may close or reuse any descriptor kept. */
 static void missed(const char *call, int dirfd, const char *path) {
-  count(1, family(call));
+  /* Families matter only in a counter file: an idle library (another proot's, PROOT_FP_OFF) skips the lookup. */
+  count(1, counts == own_counts ? FAM_OTHER : family(call));
   if (!miss_log) return;
   char line[2 * PATH_MAX + 128], base[PATH_MAX] = "";
   if (path && path[0] != '/' && dirfd != AT_FDCWD) {

@@ -537,6 +537,8 @@
     <string name="perf_gamestate">Game state hints</string>
     <string name="perf_gamestate_hint">Tells Android when the session is loading and when a game is in front. Some devices speed up loading for it. Applies next session.</string>
     <string name="perf_gamestate_needs_13">Needs Android 13 or later.</string>
+    <string name="perf_glibc">Patched glibc (experimental)</string>
+    <string name="perf_glibc_hint">Runs the runtime on a rebuilt copy of its glibc that never makes the calls Android blocks, with the original kept beside it. Turns itself off if two sessions in a row fail to start. Applies next session.</string>
     <string name="perf_measure">Measurement</string>
     <string name="perf_report">Performance report</string>
     <string name="perf_report_hint">Counts proot\'s traps, its CPU time and the fast path\'s hits through each session, into perf-report.txt in the session\'s logs. Off, nothing is counted.</string>

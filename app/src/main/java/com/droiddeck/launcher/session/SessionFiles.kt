@@ -87,6 +87,10 @@ object SessionFiles {
             "usr/local/bin/droiddeck-open-url" to "usr/local/bin/droiddeck-open-url",
             "usr/local/bin/droiddeck-steam-games" to "usr/local/bin/droiddeck-steam-games",
             "usr/local/bin/droiddeck-pad-defaults" to "usr/local/bin/droiddeck-pad-defaults",
+            // pacman's hook and the script it runs: a glibc upgrade mid-session marks what NativeGlibc
+            // staged as replaced.
+            "usr/local/bin/droiddeck-glibc-state" to "usr/local/bin/droiddeck-glibc-state",
+            "usr/share/libalpm/hooks/zz-droiddeck-glibc.hook" to "usr/share/libalpm/hooks/zz-droiddeck-glibc.hook",
             // Flatpak: the bwrap stand-in, the store's helper and setup, and the front end's launcher.
             "usr/local/bin/droiddeck-bwrap" to "usr/local/bin/droiddeck-bwrap",
             "usr/local/bin/droiddeck-flatpak" to "usr/local/bin/droiddeck-flatpak",
@@ -231,6 +235,8 @@ object SessionFiles {
         if (bigPictureMovieInstalled) {
             ensureStartupMovieDefault(File(root, "root/.local/share/Steam/config/config.vdf"))
         }
+        // Performance > Patched glibc: the rebuilt glibc over the stock files, or the stock files back.
+        NativeGlibc.stage(context, root)
     }
 
     private fun stageStartupMovie(context: Context, directory: File, name: String): Boolean {

@@ -1,0 +1,13 @@
+# DroidDeck: glibc was installed or upgraded, so the files the app may have staged over it at
+# session start (Performance > Patched glibc) are the package's own again. droiddeck-glibc-state
+# says so in /etc/droiddeck/glibc-state until the next session start checks them.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = glibc
+
+[Action]
+Description = Marking DroidDeck's staged glibc as replaced...
+When = PostTransaction
+Exec = /usr/local/bin/droiddeck-glibc-state

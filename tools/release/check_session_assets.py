@@ -11,6 +11,7 @@ def source_assets(overlay=OVERLAY):
     sources = list((overlay / 'usr/local/bin').glob('droiddeck-*'))
     sources += [path for path in [overlay / 'usr/local/bin/steam-compatibility'] if path.is_file()]
     sources += [path for path in (overlay / 'usr/bin').rglob('*') if path.is_file()]
+    sources += list((overlay / 'usr/share/libalpm/hooks').glob('*.hook'))
     result = {source: 'assets/linuxfs/' + source.relative_to(overlay).as_posix() for source in sources}
     if overlay == OVERLAY:
         desktop = overlay.parent / 'desktop'

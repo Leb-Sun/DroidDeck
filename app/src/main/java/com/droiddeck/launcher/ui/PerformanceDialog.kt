@@ -48,6 +48,7 @@ fun PerformancePage(
     prootFastPath: Boolean,
     prootExitKill: Boolean,
     gameStateHints: Boolean,
+    patchedGlibc: Boolean,
     perfReport: Boolean,
     guestHostname: String,
     phantomWarning: String?,
@@ -66,6 +67,7 @@ fun PerformancePage(
     onProotFastPath: (Boolean) -> Unit,
     onProotExitKill: (Boolean) -> Unit,
     onGameStateHints: (Boolean) -> Unit,
+    onPatchedGlibc: (Boolean) -> Unit,
     onPerfReport: (Boolean) -> Unit,
     onCopyPerfReport: () -> Unit,
     onGuestHostname: (String) -> Unit,
@@ -176,6 +178,11 @@ fun PerformancePage(
                 if (gameStateSupported) stringResource(R.string.perf_gamestate_hint)
                 else stringResource(R.string.perf_gamestate_needs_13),
                 gameStateHints && gameStateSupported, enabled = gameStateSupported, onChange = onGameStateHints,
+            )
+            ToggleRow(
+                host, "glibc", stringResource(R.string.perf_glibc),
+                stringResource(R.string.perf_glibc_hint),
+                patchedGlibc, onChange = onPatchedGlibc,
             )
         }
         SettingsGroup(stringResource(R.string.perf_measure)) {

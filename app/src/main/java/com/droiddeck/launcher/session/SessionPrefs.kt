@@ -425,6 +425,30 @@ object SessionPrefs {
     }
 
     /**
+     * Whether the session stages the rootfs's glibc rebuilt by tools/glibc over the stock files
+     * (NativeGlibc), keeping the stock ones beside it. Off by default; it turns itself off after two
+     * sessions in a row fail to start with it.
+     */
+    fun patchedGlibc(context: Context): Boolean = prefs(context).getBoolean("patchedGlibc", false)
+
+    fun setPatchedGlibc(context: Context, on: Boolean) {
+        prefs(context).edit().putBoolean("patchedGlibc", on).apply()
+    }
+
+    /**
+     * Which build [patchedGlibc] stages: NativeGlibc.PATCHED (tools/glibc/patches), or
+     * NativeGlibc.REBUILD, Arch's own build without them, which shows staging alone changes nothing.
+     * Set through `droiddeckctl prefs set session glibcFlavor rebuild`; no screen offers it.
+     */
+    fun glibcFlavor(context: Context): String =
+        prefs(context).getString("glibcFlavor", null)?.takeIf { it in NativeGlibc.FLAVORS } ?: NativeGlibc.PATCHED
+
+    fun setGlibcFlavor(context: Context, flavor: String) {
+        require(flavor in NativeGlibc.FLAVORS)
+        prefs(context).edit().putString("glibcFlavor", flavor).apply()
+    }
+
+    /**
      * Whether sessions write a performance report (SessionPerf): proot's stops, the tracer's CPU and
      * the fast path's hits through each phase, into perf-report.txt and .json in the session's logs.
      * Off by default, and off nothing is counted.

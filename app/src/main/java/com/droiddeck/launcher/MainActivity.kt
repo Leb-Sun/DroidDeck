@@ -156,6 +156,7 @@ class MainActivity : ComponentActivity() {
     private var prootFastPath by mutableStateOf(true)
     private var prootExitKill by mutableStateOf(false)
     private var gameStateHints by mutableStateOf(false)
+    private var patchedGlibc by mutableStateOf(false)
     private var perfReport by mutableStateOf(false)
     private var guestHostname by mutableStateOf(SessionPrefs.DEFAULT_GUEST_HOSTNAME)
     private var phantomWarning by mutableStateOf<String?>(null)
@@ -1418,7 +1419,7 @@ class MainActivity : ComponentActivity() {
             gamescopeRealtime = gamescopeRealtime,
             gpuClockPin = gpuClockPin,
             prootNoSeccomp = prootNoSeccomp, prootFastPath = prootFastPath, prootExitKill = prootExitKill,
-            gameStateHints = gameStateHints, perfReport = perfReport,
+            gameStateHints = gameStateHints, patchedGlibc = patchedGlibc, perfReport = perfReport,
             guestHostname = guestHostname, phantomWarning = phantomWarning,
             onClientOverride = { on -> SessionPrefs.setClientCpusOverride(this, on); clientOverride = on },
             onTuSysmem = { on -> SessionPrefs.setTuSysmem(this, on); tuSysmem = on },
@@ -1435,6 +1436,7 @@ class MainActivity : ComponentActivity() {
             onProotFastPath = { on -> SessionPrefs.setProotFastPath(this, on); prootFastPath = on },
             onProotExitKill = { on -> SessionPrefs.setProotExitKill(this, on); prootExitKill = on },
             onGameStateHints = { on -> SessionPrefs.setGameStateHints(this, on); gameStateHints = on },
+            onPatchedGlibc = { on -> SessionPrefs.setPatchedGlibc(this, on); patchedGlibc = on },
             onPerfReport = { on -> SessionPrefs.setPerfReport(this, on); perfReport = on },
             onCopyPerfReport = {
                 val summary = com.droiddeck.launcher.session.SessionPerf.latestSummary(this)
@@ -1600,6 +1602,7 @@ class MainActivity : ComponentActivity() {
         prootFastPath = SessionPrefs.prootFastPath(this)
         prootExitKill = SessionPrefs.prootExitKill(this)
         gameStateHints = SessionPrefs.gameStateHints(this)
+        patchedGlibc = SessionPrefs.patchedGlibc(this)
         perfReport = SessionPrefs.perfReport(this)
         guestHostname = SessionPrefs.guestHostname(this)
         refreshPhantomStatus()

@@ -165,6 +165,9 @@ object DeviceReport {
         k("proot fast path", SessionPrefs.prootFastPath(context))
         k("proot exit kill", SessionPrefs.prootExitKill(context))
         k("Game state hints", SessionPrefs.gameStateHints(context))
+        k("Patched glibc", SessionPrefs.patchedGlibc(context).toString() + " (" + SessionPrefs.glibcFlavor(context) + ") · " +
+            (com.droiddeck.launcher.session.NativeGlibc.readState(LinuxRuntime.rootDir(context)) ?: "no state yet") +
+            " · failed starts " + com.droiddeck.launcher.session.NativeGlibc.failedStarts(context))
         k("Performance report", SessionPrefs.perfReport(context))
         k("Guest host name", SessionPrefs.guestHostname(context))
         k("DirectAudio for games", SessionPrefs.directAudio(context))

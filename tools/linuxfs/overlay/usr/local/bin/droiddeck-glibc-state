@@ -1,0 +1,26 @@
+#!/bin/bash
+# Run by pacman (usr/share/libalpm/hooks/zz-droiddeck-glibc.hook) after glibc is installed or
+# upgraded. Whatever the app staged over the stock files at session start (session/NativeGlibc.kt,
+# Performance > Patched glibc) has just been replaced by the package's own, mid-session if a terminal
+# ran pacman. /etc/droiddeck/glibc-state then says "mismatch <version>" whatever it said before, until
+# the next session start hashes the files and writes what it finds; anything that reads the state
+# (native mode) acts only on "patched". The stock copies the app kept are its to clear.
+# The first argument is the root, "/" when pacman runs it; the tests point it at a temp tree.
+set -u
+root=${1:-/}
+root=${root%/}
+version=
+for desc in "$root"/var/lib/pacman/local/glibc-[0-9]*/desc; do
+  [ -f "$desc" ] || continue
+  [ "$(sed -n '/^%NAME%$/{n;p;q;}' "$desc")" = glibc ] || continue
+  version=$(sed -n '/^%VERSION%$/{n;p;q;}' "$desc")
+done
+dir=$root/etc/droiddeck
+mkdir -p "$dir" 2>/dev/null || exit 0
+staged=$dir/glibc-state.staged
+# A hook that fails cannot undo the transaction anyway; say why and leave pacman be.
+if ! { printf 'mismatch %s\n' "${version:-unknown}" > "$staged" && mv -f "$staged" "$dir/glibc-state"; }; then
+  rm -f "$staged"
+  echo "droiddeck-glibc-state: could not write $dir/glibc-state" >&2
+fi
+exit 0

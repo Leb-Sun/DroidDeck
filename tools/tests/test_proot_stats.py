@@ -81,9 +81,11 @@ int main(int argc, char **argv) {
 }
 """
 
-# n stat()s of a file that exists and n access()es of one that does not, then a ready file, then it
-# waits for stdin to close: its counters are read while it is alive.
+# n stat()s of a file that exists, n access()es of one that does not and n fstatat()s with a flag the
+# fast path leaves to proot; then a ready file, then it waits for stdin to close: its counters are
+# read while it is alive.
 PATH_PROGRAM = r"""
+#define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -94,6 +96,7 @@ int main(int argc, char **argv) {
   for (int i = 0; i < n; i++) {
     if (stat(argv[2], &st) != 0) return 3;
     if (access(argv[3], F_OK) == 0) return 4;
+    if (fstatat(AT_FDCWD, argv[2], &st, AT_EMPTY_PATH) != 0) return 6;
   }
   int fd = open(argv[4], O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) return 5;
@@ -201,14 +204,17 @@ class ProotStatsTest(unittest.TestCase):
         self.assertEqual(1, counters["version"])
         self.assertGreaterEqual(counters["hits"]["stat"], 150)
         self.assertGreaterEqual(counters["hits"]["access"], 150)
-        self.assertEqual(0, sum(counters["misses"].values()))
-        traced = stats["syscalls"]["newfstatat"]["enter"] + stats["syscalls"]["faccessat"]["enter"]
-        self.assertLess(traced, 20)
+        self.assertEqual(150, counters["misses"]["stat"])
+        self.assertEqual(150, sum(counters["misses"].values()))
+        # The hits never stop in proot; the misses do, once each.
+        self.assertLess(stats["syscalls"].get("faccessat", {"enter": 0})["enter"], 20)
+        self.assertGreaterEqual(stats["syscalls"]["newfstatat"]["enter"], 150)
+        self.assertLess(stats["syscalls"]["newfstatat"]["enter"], 170)
 
         live, stats = self.path_run("off", fast_path=False)
         self.assertEqual({}, live)
         traced = stats["syscalls"]["newfstatat"]["enter"] + stats["syscalls"]["faccessat"]["enter"]
-        self.assertGreaterEqual(traced, 300)
+        self.assertGreaterEqual(traced, 450)
 
 
 if __name__ == "__main__":

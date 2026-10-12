@@ -19,15 +19,16 @@ live **outside the repo** (under `/opt/nspike` during the spike), never here.
 
 | path | what |
 |---|---|
-| `launcher/seccomp-launch.c` | Installs a seccomp filter reproducing Android's app-policy blocklist with `SECCOMP_RET_TRAP` (SIGSYS), then execs the target. Profiles `android14`/`android15`/`android16q`. `--dump {x86_64,aarch64}` prints the policy as numbers. This is the "no tracer" harness: a trapped syscall kills the process, as on a device. |
+| `launcher/seccomp-launch.c` | Installs a seccomp filter reproducing Android's app-policy blocklist with `SECCOMP_RET_TRAP` (SIGSYS), then execs the target. Profiles `android14`/`android15`/`android16q`, and `android12` (android14 plus `close_range`, for glibc patch 0007). `--dump {x86_64,aarch64}` prints the policy as numbers. This is the "no tracer" harness: a trapped syscall kills the process, as on a device. |
 | `launcher/trap-trace.c` | Diagnostic only: ptraces the target (following fork/vfork/clone/exec) and reports which blocked syscall each SIGSYS came from. A SIGSYS handler cannot do this — it resets across `execve` (02 §5.3) — so a tracer is the only way to *name* an escape. Not part of the runtime. |
 | `launcher/policy.inc.h` | The shared blocklist table (x86_64 + aarch64 numbers) and BPF builder. |
-| `glibc-patches/*.patch` | The minimum glibc 2.43 patch set (see below), against upstream `glibc_2.43.orig.tar.xz`. Apply `0001`…`0006` in order with `patch -p1`. |
+| `glibc-patches/*.patch` | The minimum glibc 2.43 patch set (see below), against upstream `glibc_2.43.orig.tar.xz`. Apply `0001`…`0006` in order with `patch -p1`. The shipping set, rebased onto Arch's commit with `0007` added, is `tools/glibc/patches` (`tools/glibc/PATCHES.md`). |
 | `execshim/execshim.c` | `LD_PRELOAD` exec shim: rewrites exec of a rootfs ELF into `$BL_LOADER --argv0 <a0> <prog>`, resolves shebangs inside the rootfs, and emulates `/proc/self/exe` (readlink/open/execve) and `/proc/self/comm`. Covers the whole exec family and `posix_spawn`. |
 | `pathxlat/pathxlat_core.h` | Header-only guest↔host path translator matching `tools/proot/fastpath/fastpath.c`'s longest-prefix / identity / nested-override bind semantics. Freestanding, so the same logic can go into ld.so. |
 | `pathxlat/libpathxlat.c` | `LD_PRELOAD` built on the core: translates the libc path wrappers for the relocated-rootfs case; table from `BL_XLAT_ROOT`/`BL_XLAT_BINDS`. |
 | `tests/test_pathxlat_core.c` | Unit test for the translator (identity, remap, nested override, single-file, component-boundary, round-trip). |
 | `tests/s1_battery.c` | Userland battery: pthreads, posix_spawn/system/popen, faccessat flags, the set*id family. |
+| `tests/close_range_test.c` | glibc patch 0007: `close_range`, `closefrom` and posix_spawn's closefrom action with `close_range` trapped (`spike.sh s7`). |
 | `bench/micro.c`, `bench/cost-matrix.sh` | Per-call / workload microbench and the S4 cost harness (native vs patched-untraced vs proot). |
 | `spike.sh` | Re-runs the spike steps (see `spike.sh help`). |
 

@@ -82,6 +82,7 @@ static const struct sc TABLE[] = {
   { "faccessat2",       439, 439 },
   { "fchmodat2",        452, 452 },
   { "openat2",          437, 437 },
+  { "close_range",      436, 436 },
 };
 #define NTAB ((int)(sizeof TABLE / sizeof TABLE[0]))
 
@@ -91,10 +92,13 @@ static const char *ALWAYS_ALLOW[] = {
   "futex", "clone", NULL,
 };
 
-enum { P14, P15, P16Q };
+/* P12 is android14's policy plus close_range, which Android blocks up to 12
+   (glibc patch 0007, tools/glibc); every later profile lets it through.  */
+enum { P14, P15, P16Q, P12 };
 
 static int profile_blocks(int prof, const char *name)
 {
+  if (!strcmp(name, "close_range")) return prof == P12;
   int gated = !strcmp(name, "clone3") || !strcmp(name, "faccessat2")
            || !strcmp(name, "fchmodat2") || !strcmp(name, "openat2");
   if (!gated) return 1;

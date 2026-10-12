@@ -31,11 +31,12 @@ steps:
   tools        build seccomp-launch, trap-trace, the pathxlat core test, execshim, pathxlat, micro
   dump         print the seccomp blocklist as x86_64 and aarch64 numbers
   baseline     show stock glibc dying with SIGSYS under the filter (S0)
-  s1           run the untraced userland battery across the three profiles (S1)
+  s1           run the untraced userland battery across the profiles (S1)
+  s7           glibc patch 0007: close_range, closefrom, posix_spawn and Python with close_range trapped (android12)
   s2           run the exec-shim tree: ld.so re-exec, shebangs, /proc/self/exe (S2)
   s3           run ls/bash/python/dlopen with the rootfs relocated, in-process xlat (S3)
   s4           cost table: native vs patched-untraced vs proot (S4)
-  all          tools dump baseline s1 s2 s3 s4
+  all          tools dump baseline s1 s7 s2 s3 s4
 Build of glibc + rootfs is described in the comments (long, network-dependent);
 this script assumes \$WORK already holds rootfs-patched, rootfs-base and the
 hostproot/ build as produced during the spike.
@@ -59,13 +60,33 @@ baseline)
   echo "rc=$?"
   "$WORK/trap-trace" --continue --chroot "$WORK/rootfs-base" --profile android16q -- /bin/true 2>&1 | grep SIGSYS ;;
 s1)
-  for prof in android14 android15 android16q; do
+  # android12 is android14 plus close_range trapped; unset means every gated call is blocked.
+  for prof in android14 android15 android16q android12; do
     case $prof in android16q) M=0;; android15) M=6;; *) M="";; esac
     say "S1 $prof (BL_NATIVE_BLOCK=${M:-unset})"
     "$WORK/seccomp-launch" --quiet --chroot "$ROOTFS" --chdir /opt/nativetest --profile $prof \
       -- /usr/bin/env ${M:+BL_NATIVE_BLOCK=$M} /opt/nativetest/s1_battery
     echo "  battery rc=$?"
   done ;;
+s7)
+  # tools/glibc patch 0007. With close_range trapped, the gate (bit 0x8, set in the unset default)
+  # keeps every glibc path off it; with the bit clear the test dies of SIGSYS (rc 159), which is
+  # the proof that the gate, not luck, kept it alive.
+  gcc -O2 -o "$ROOTFS/opt/nativetest/close_range_test" "$HERE/tests/close_range_test.c"
+  for M in "" f; do
+    say "S7 android12 (BL_NATIVE_BLOCK=${M:-unset})"
+    "$WORK/seccomp-launch" --quiet --chroot "$ROOTFS" --chdir /opt/nativetest --profile android12 \
+      -- /usr/bin/env ${M:+BL_NATIVE_BLOCK=$M} /opt/nativetest/close_range_test
+    echo "  rc=$?"
+  done
+  say "S7 android12, BL_NATIVE_BLOCK=7: close_range not marked (expect rc 159)"
+  "$WORK/seccomp-launch" --quiet --chroot "$ROOTFS" --chdir /opt/nativetest --profile android12 \
+    -- /usr/bin/env BL_NATIVE_BLOCK=7 /opt/nativetest/close_range_test
+  echo "  rc=$?"
+  say "S7 android12, python3 subprocess (close_fds through close_range)"
+  "$WORK/seccomp-launch" --quiet --chroot "$ROOTFS" --chdir /opt/nativetest --profile android12 \
+    -- /usr/bin/python3 -I /opt/nativetest/py_test.py
+  echo "  rc=$?" ;;
 s2)
   say "S2 exec shim tree, untraced"
   "$WORK/seccomp-launch" --quiet --chroot "$ROOTFS" --chdir /opt/nativetest --profile android16q \
@@ -82,6 +103,6 @@ s3)
 s4)
   bash "$HERE/bench/cost-matrix.sh" ;;
 all)
-  for s in tools dump baseline s1 s2 s3 s4; do "$0" "$s"; done ;;
+  for s in tools dump baseline s1 s7 s2 s3 s4; do "$0" "$s"; done ;;
 *) echo "unknown step $cmd"; exit 2 ;;
 esac

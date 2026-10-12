@@ -13,6 +13,7 @@
  *   android14  : also clone3, faccessat2, fchmodat2, openat2 blocked
  *   android15  : clone3 allowed; faccessat2/fchmodat2/openat2 still blocked
  *   android16q : faccessat2/fchmodat2/openat2 allowed too (16 QPR1+/17)
+ *   android12  : android14 plus close_range blocked (glibc patch 0007)
  *
  * A trapped syscall kills the process with SIGSYS, like Android with no tracer.
  * (Use trap-trace to learn *which* syscall; a SIGSYS handler cannot, because
@@ -36,14 +37,15 @@ static void dump(const char *arch)
 {
   int aarch64 = !strcmp(arch, "aarch64");
   printf("# DroidDeck app-seccomp blocklist, %s numbers\n", arch);
-  printf("# a14/a15/a16q = blocked (1) or allowed (0) under that profile\n");
-  printf("# %-20s %6s  a14 a15 a16q\n", "syscall", "nr");
+  printf("# a14/a15/a16q/a12 = blocked (1) or allowed (0) under that profile\n");
+  printf("# %-20s %6s  a14 a15 a16q a12\n", "syscall", "nr");
   for (int i = 0; i < NTAB; i++) {
     int nr = aarch64 ? TABLE[i].aarch64 : TABLE[i].x86_64;
-    printf("%-22s %6d   %d   %d    %d\n", TABLE[i].name, nr,
+    printf("%-22s %6d   %d   %d    %d   %d\n", TABLE[i].name, nr,
            profile_blocks(P14, TABLE[i].name),
            profile_blocks(P15, TABLE[i].name),
-           profile_blocks(P16Q, TABLE[i].name));
+           profile_blocks(P16Q, TABLE[i].name),
+           profile_blocks(P12, TABLE[i].name));
   }
   printf("# allowed (never blocked):");
   for (int i = 0; ALWAYS_ALLOW[i]; i++) printf(" %s", ALWAYS_ALLOW[i]);
@@ -58,13 +60,14 @@ int main(int argc, char **argv)
   for (; i < argc; i++) {
     if (!strcmp(argv[i], "--")) { i++; break; }
     else if (!strcmp(argv[i], "--quiet")) quiet = 1;
-    else if (!strcmp(argv[i], "--list")) { printf("profiles: android14 android15 android16q\n"); return 0; }
+    else if (!strcmp(argv[i], "--list")) { printf("profiles: android14 android15 android16q android12\n"); return 0; }
     else if (!strcmp(argv[i], "--dump") && i + 1 < argc) { dump(argv[++i]); return 0; }
     else if (!strcmp(argv[i], "--profile") && i + 1 < argc) {
       const char *p = argv[++i];
       if (!strcmp(p, "android14")) prof = P14;
       else if (!strcmp(p, "android15")) prof = P15;
       else if (!strcmp(p, "android16q")) prof = P16Q;
+      else if (!strcmp(p, "android12")) prof = P12;
       else { fprintf(stderr, "unknown profile %s\n", p); return 2; }
     }
     else if (!strcmp(argv[i], "--chroot") && i + 1 < argc) chroot_dir = argv[++i];
@@ -85,7 +88,7 @@ int main(int argc, char **argv)
   if (nb < 0) return 4;
   if (!quiet)
     fprintf(stderr, "[seccomp-launch] profile=%s blocked=%d -> exec %s\n",
-            prof == P14 ? "android14" : prof == P15 ? "android15" : "android16q",
+            prof == P14 ? "android14" : prof == P15 ? "android15" : prof == P16Q ? "android16q" : "android12",
             nb, argv[i]);
 
   execvp(argv[i], &argv[i]);

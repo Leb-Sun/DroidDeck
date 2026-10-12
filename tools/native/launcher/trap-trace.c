@@ -50,7 +50,8 @@ int main(int argc, char **argv)
     else if (!strcmp(argv[i], "--continue")) cont = 1;
     else if (!strcmp(argv[i], "--profile") && i + 1 < argc) {
       const char *p = argv[++i];
-      prof = !strcmp(p, "android15") ? P15 : !strcmp(p, "android16q") ? P16Q : P14;
+      prof = !strcmp(p, "android15") ? P15 : !strcmp(p, "android16q") ? P16Q
+           : !strcmp(p, "android12") ? P12 : P14;
     }
     else if (!strcmp(argv[i], "--chroot") && i + 1 < argc) chroot_dir = argv[++i];
     else if (!strcmp(argv[i], "--chdir") && i + 1 < argc) chdir_dir = argv[++i];

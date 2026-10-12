@@ -397,6 +397,63 @@ class ScenarioTest(FakeAdbTest):
         for step in steps:
             parser.parse_args(["--serial", "x"] + [str(w) for w in step])
 
+    def ab_reports(self, *sessions, teardown=1200):
+        return [{"ok": True, "command": "perf", "sessionId": sid, "summary": f"{sid}\n",
+                 "report": {"schema": "droiddeck.perf/2", "teardownMs": teardown, "times": {"readyS": 20.0}}}
+                for sid in sessions]
+
+    def test_ab_runs_a_b_b_a_with_the_preference_set_before_each(self):
+        self.configure({"state": state(), "prefs": {"ok": True, "command": "prefs"},
+                        "perf": self.ab_reports("s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8")})
+        path = self.write({"name": "t", "repeat": 5, "steps": [["state"]]})
+        code, report = self.run_scenario(path, "--ab", "gameStateHints=false,true", "--repeat", "2", "--cooldown", "0")
+        self.assertEqual(0, code)
+        self.assertEqual("ABBAABBA", report["ab"]["order"])
+        self.assertEqual(8, len(report["runs"]))
+        sets = [c["request"] for c in self.calls("prefs")]
+        self.assertEqual(["false", "true", "true", "false"] * 2, [r["value"] for r in sets])
+        self.assertEqual({("set", "session", "gameStateHints", "bool")}, {(r["op"], r["file"], r["key"], r["type"]) for r in sets})
+        for i, run in enumerate(report["runs"]):
+            folder = Path(run["folder"])
+            ab = json.loads((folder / "ab.json").read_text())
+            self.assertEqual(("ABBAABBA"[i], True), (ab["arm"], ab["ok"]))
+            self.assertEqual(f"s{i + 1}", run["report"]["sessionId"])
+            self.assertEqual(1200, json.loads((folder / "perf-report.json").read_text())["teardownMs"])
+            self.assertEqual(f"s{i + 1}\n", (folder / "perf-report.txt").read_text())
+            for name in ("ab.json", "perf-report.json", "perf-report.txt"):
+                self.assertEqual(0o600, (folder / name).stat().st_mode & 0o777, name)
+            # The preference is set first, before the scenario's own steps.
+            self.assertEqual(["prefs", "set", "session", "gameStateHints"], json.loads((folder / "steps.json").read_text())[0]["what"][:4])
+        # What perf-compare reads: the arms from ab.json.
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(0, load("perf-compare").main(["--json", report["out"]]))
+        compared = json.loads(out.getvalue())
+        self.assertEqual(("gameStateHints", "false", "true"), (compared["key"], compared["a"]["value"], compared["b"]["value"]))
+        self.assertEqual(4, len(compared["b"]["runs"]))
+
+    def test_ab_waits_for_the_teardown_and_fails_a_run_without_a_report_of_its_own(self):
+        self.addCleanup(setattr, scenario, "REPORT_WAIT_S", scenario.REPORT_WAIT_S)
+        self.addCleanup(setattr, scenario, "REPORT_POLL_S", scenario.REPORT_POLL_S)
+        scenario.REPORT_WAIT_S, scenario.REPORT_POLL_S = 0.5, 0.01
+        # The first answer is the run's report before its teardown time is in; then the same session again.
+        perf = self.ab_reports("s1", teardown=None) + self.ab_reports("s1")
+        self.configure({"state": state(), "prefs": {"ok": True, "command": "prefs"}, "perf": perf})
+        path = self.write({"name": "t", "steps": [["state"]]})
+        code, report = self.run_scenario(path, "--ab", "auditScope=proton,client", "--cooldown", "0", "--keep-going")
+        self.assertEqual(1, code)
+        self.assertEqual(1200, report["runs"][0]["report"]["teardownMs"])
+        self.assertIn("no new performance report", report["runs"][1]["error"])
+        self.assertFalse(json.loads((Path(report["runs"][1]["folder"]) / "ab.json").read_text())["ok"])
+        self.assertEqual({"string"}, {c["request"]["type"] for c in self.calls("prefs")})
+
+    def test_a_bad_ab_is_refused_before_adb(self):
+        path = self.write({"name": "t", "steps": [["state"]]})
+        for spec in ("gameStateHints=true", "gameStateHints=true,true", "=a,b", "k=a,b,c"):
+            code, report = self.run_scenario(path, "--ab", spec)
+            self.assertEqual(2, code, spec)
+            self.assertIn("--ab wants KEY=A,B", report["error"])
+        self.assertFalse(self.calls())
+
     def test_after_steps_run_after_a_failure(self):
         self.configure({"state": state(focused=769), "quit": {"ok": True, "remaining": []}})
         path = self.write({"name": "t", "repeat": 2, "vars": {"appId": 7},

@@ -313,16 +313,16 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         override fun onInputDeviceAdded(deviceId: Int) {
             logInputDevice("connected", deviceId)
             padBridge?.syncConnectedControllers()
-            updateOnScreenControls()
+            refreshControls()
             updatePointerCapture()
         }
         override fun onInputDeviceRemoved(deviceId: Int) {
             Log.i(TAG, "input device $deviceId disconnected")
             padBridge?.onDeviceRemoved(deviceId)
-            updateOnScreenControls()
+            refreshControls()
             updatePointerCapture()
         }
-        override fun onInputDeviceChanged(deviceId: Int) = updateOnScreenControls()
+        override fun onInputDeviceChanged(deviceId: Int) = refreshControls()
     }
 
     private var runtimeRemovalBlocked = false
@@ -386,7 +386,7 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         bridge.setSelectSteam(ControllerPrefs.read(this).selectSteam)
         padBridge = bridge
         SessionState.padBridge = bridge
-        SteamControllerBle.listener = { uiHandler.post { updatePadMotion(); updateOnScreenControls() } }
+        SteamControllerBle.listener = { uiHandler.post { updatePadMotion(); refreshControls() } }
         steamController = SteamControllerBle(this).also { it.start() }
         padMotion = com.droiddeck.launcher.input.PadMotion(this) {
             @Suppress("DEPRECATION")
@@ -1874,11 +1874,17 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         applyUnfoldedControls()
     }
 
+    private fun refreshControls() {
+        applyUnfoldedControls()
+        updateOnScreenControls()
+    }
+
     private fun applyUnfoldedControls() {
         if (!::sessionRoot.isInitialized) return
         val width = sessionRoot.width
         val height = sessionRoot.height
         val wanted = unfoldedControls && com.droiddeck.launcher.session.SessionDisplay.foldable(this) &&
+            !PadBridge.anyControllerConnected() && !SteamControllerBle.connected &&
             SessionState.mode == SessionService.MODE_STEAM && SessionState.deckPad &&
             !pipUi && !isInPictureInPictureMode && width > 0 && height > 0 &&
             resources.configuration.smallestScreenWidthDp >= com.droiddeck.launcher.session.SessionDisplay.UNFOLDED_MIN_DP
@@ -2289,12 +2295,12 @@ class SessionActivity : ComponentActivity(), SurfaceHolder.Callback {
         if (SessionState.guestPid > 1) padBridge?.syncConnectedControllers()
         onScreenControls?.reload()
         controllerSettings = ControllerPrefs.read(this)
-        updateOnScreenControls()
         resumed = true
         updatePointerCapture()
         if (!pipUi) sessionClipboard.start()
         updatePadMotion()
         readPrefs()
+        refreshControls()
         if (::pip.isInitialized) pip.resumed()
         if (CompositorHost.isStarted) applyFrameGen()
         SessionPrefs.sessionPrefs(this).registerOnSharedPreferenceChangeListener(cardboardPrefListener)

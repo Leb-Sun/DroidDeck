@@ -81,11 +81,9 @@ import com.droiddeck.launcher.session.SessionPrefs
 import com.droiddeck.launcher.stores.download.StoreDownloadTier
 import com.droiddeck.launcher.R
 
-// The Setup page: runtime and device checks, tools, frame generation and launch settings.
 
 private enum class CheckState { OK, WARN, BUSY }
 
-/** One requirement in Setup's system check: a status mark, what it is, and at most one action. */
 @Composable
 private fun CheckRow(state: CheckState, title: String, detail: String?, divider: Boolean = true, action: (@Composable () -> Unit)? = null) {
     val colors = MaterialTheme.colorScheme
@@ -159,7 +157,6 @@ internal fun SetupPanel(
     }
     val colors = MaterialTheme.colorScheme
     val pal = LocalPalette.current
-    // Tested hardware passes; an Adreno below it (a 610, say) warns rather than claiming support.
     val gpu = remember { com.droiddeck.launcher.gpu.GpuInfo.detect() }
     val gpuOk = gpu.support == com.droiddeck.launcher.gpu.GpuInfo.Support.TESTED
     val gpuName = remember { DeviceSupport.gpuName(ctx) }
@@ -168,15 +165,12 @@ internal fun SetupPanel(
     var showLimitDetails by rememberSaveable { mutableStateOf(false) }
     var editSgdbKey by remember { mutableStateOf(false) }
     if (editSgdbKey) SgdbKeyDialog(s.sgdbUserKey, onSave = { a.onSgdbKey(it); editSgdbKey = false }, onDismiss = { editSgdbKey = false })
-    // Four tabs by scope, a chip row with one gliding selection; LB and RB turn them from
-    // anywhere on the page. Build and credits are on the Updates page.
     val tabs = listOf(stringResource(R.string.setup_tab_overview), stringResource(R.string.setup_tab_controller), stringResource(R.string.setup_tab_launcher), stringResource(R.string.setup_tab_diagnostics))
     var tab by rememberSaveable { mutableStateOf(0) }
     val chipFocus = remember { List(4) { FocusRequester() } }
     var tabTurned by remember { mutableStateOf(false) }
     val pick: (Int) -> Unit = { i -> tab = i; tabTurned = true }
     val inputModeManager = LocalInputModeManager.current
-    // The control a controller was on went with the old tab: it lands on the new tab's chip.
     LaunchedEffect(tab) {
         if (tabTurned && inputModeManager.inputMode == InputMode.Keyboard) {
             androidx.compose.runtime.withFrameNanos { }
@@ -260,8 +254,6 @@ internal fun SetupPanel(
                                 }
                             }
                             AnimatedVisibility(showLimitDetails, enter = expandVertically(Motion.sp(1f)) + fadeIn(Motion.sp(1f)), exit = shrinkVertically(Motion.sp(1f)) + fadeOut(Motion.sp(1f))) {
-                                // One sentence and at most three buttons. The computer route and its
-                                // raw command live on the full page Wireless debugging opens.
                                 Column(modifier = Modifier.fillMaxWidth().padding(start = 56.dp, end = 14.dp, top = 4.dp, bottom = 10.dp)) {
                                     Text(
                                         if (limitBlocks) PhantomProcessLimit.gateInstructions(ctx, s.phantomProcessStatus)
@@ -298,7 +290,6 @@ internal fun SetupPanel(
                             )
                         }
                         val all = listOf(gpuCheck, runtimeCheck, limitCheck, accountCheck)
-                        // Everything passes: one line says so, and Details opens the checks in place.
                         ReadinessCard(
                             passing, checks.size,
                             listOfNotNull(
@@ -312,7 +303,6 @@ internal fun SetupPanel(
                             val shownChecks = all.filterIndexed { i, _ -> checks[i] }
                             shownChecks.forEachIndexed { i, check -> check(i < shownChecks.lastIndex) }
                         }
-                        // Each check that warns is its own card, its Fix it as it always was.
                         if (passing < checks.size) {
                             SectionTitle(stringResource(R.string.setup_needs_you), null)
                             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -320,14 +310,6 @@ internal fun SetupPanel(
                                     if (!checks[i]) Column(Modifier.fillMaxWidth().clip(Shape14).background(colors.surface).border(1.dp, AttentionAmber.copy(alpha = 0.5f), Shape14)) { check(false) }
                                 }
                             }
-                        }
-                        SettingsGroup(stringResource(R.string.setup_account)) {
-                            accountCheck(true)
-                            ToggleRow(
-                                host, "offline", stringResource(R.string.setup_offline),
-                                s.offlineAccount?.let { if (it.isEmpty()) stringResource(R.string.setup_signed_in_unnamed) else stringResource(R.string.setup_signed_in, it) } ?: stringResource(R.string.setup_sign_in_first),
-                                s.offline, enabled = s.offlineAccount != null,
-                            ) { a.onOffline() }
                         }
                         SettingsGroup(stringResource(R.string.setup_runtime)) { runtimeCheck(false) }
                     }
@@ -366,6 +348,7 @@ internal fun SetupPanel(
                                 ToggleRow(host, "launcher-animations", stringResource(R.string.setup_animations), null,
                                     s.animationsEnabled, onChange = a.onAnimationsEnabled)
                                 LanguageRow(host, s.language, a.onLanguage)
+                                ToggleRow(host, "show-stores", stringResource(R.string.setup_stores), null, s.gameStoresEnabled, onChange = a.onGameStoresEnabled)
                             }
                         }
                         val device: @Composable () -> Unit = {
@@ -399,7 +382,6 @@ internal fun SetupPanel(
                                 )
                             }
                         }
-                        // Two columns on a wide page: how it looks; this device and the library's art.
                         if (wide) Row(horizontalArrangement = Arrangement.spacedBy(16.dp), verticalAlignment = Alignment.Top) {
                             Column(Modifier.weight(1f)) { look() }
                             Column(Modifier.weight(1f)) { device(); art() }
@@ -412,6 +394,8 @@ internal fun SetupPanel(
                             ActionRow(stringResource(R.string.setup_latest_logs), stringResource(R.string.drawer_logs_hint), stringResource(R.string.drawer_share_logs), a.onShareLogs,
                                 progress = com.droiddeck.launcher.session.SessionLogShare.progress)
                             ActionRow(stringResource(R.string.setup_saved_logs), stringResource(R.string.setup_saved_logs_hint, com.droiddeck.launcher.session.SessionPaths.KEEP_SESSIONS), stringResource(R.string.setup_clear_logs), a.onClearLogs)
+                            ActionRow(stringResource(R.string.setup_reset_settings), stringResource(R.string.setup_reset_settings_hint),
+                                stringResource(R.string.setup_reset_settings_button), a.onResetSettings)
                         }
                     }
                 }
@@ -420,10 +404,6 @@ internal fun SetupPanel(
     }
 }
 
-/**
- * The checks as one card while they all pass: a ring with how many pass, "Ready to play" and one
- * line of what that means, and a Details chip that opens the checks themselves in place ([checks]).
- */
 @Composable
 private fun ReadinessCard(passing: Int, total: Int, line: String, open: Boolean, onDetails: () -> Unit, checks: @Composable () -> Unit) {
     val colors = MaterialTheme.colorScheme
@@ -465,26 +445,18 @@ private fun FrameGenMenu(s: FrontEndState, a: FrontEndActions, host: MenuHost) {
     FrameGenMenu(host, s.frameGen, s.lossless, a.onFrameGenPick, a.onImportLossless)
 }
 
-/**
- * What shapes a launch, beside the game rather than three screens away in Setup. They are the
- * app-wide settings - each card opens the same page or menu Setup does.
- */
 @Composable
 internal fun LaunchSettings(s: FrontEndState, a: FrontEndActions, host: MenuHost, game: com.droiddeck.launcher.frontend.Library.SteamGame? = null) {
-    // Three across, two on a narrow page; each row's cards share one height.
     val columns = if (LocalNarrowPane.current) 2 else 3
     val controller = a.controller
     val context = androidx.compose.ui.platform.LocalContext.current
     val inputMode = androidx.compose.ui.platform.LocalInputModeManager.current
-    // The game's prefix is compatdata/<id>, as droiddeck-game-env reads it: a Steam title's appid, an
-    // added game's shortcut appid (unsigned). Recommended scans the game's own folder either way.
     val wincompKey = game?.takeIf { it.library == com.droiddeck.launcher.frontend.Library.ADDED || it.appId > 0 }?.profileKey
     var wincompOpen by remember(wincompKey) { mutableStateOf<Boolean?>(null) }
     val wincompPicks = remember(wincompKey, wincompOpen) { wincompKey?.let { com.droiddeck.launcher.session.WinComponents.picks(context, it) }.orEmpty() }
     val cards = buildList<@Composable (Modifier) -> Unit> {
         add { m ->
             val back = stringResource(R.string.hop_from_games)
-            // Components is its own section: the card hops there, and B on it comes back here.
             SettingCard(stringResource(R.string.setup_card_components), stringResource(R.string.setup_card_components_hint), "card:components", m.hopSource("card:components")) {
                 val at = Hops.sources["card:components"]
                 if (at == null) a.onComponents(true)
@@ -500,10 +472,7 @@ internal fun LaunchSettings(s: FrontEndState, a: FrontEndActions, host: MenuHost
             }
         }
         if (controller != null) add { m -> SettingCard(stringResource(R.string.setup_card_controls), stringResource(R.string.setup_card_controls_hint), "card:controls", m, controller.onMapping) }
-        // An Epic game's own launch choices, kept in its sidecar so a launch from the Steam client
-        // honours them too (droiddeck-store-launch reads the same file).
-        // Epic's launch choices; cloud saves live in the game's Cloud saves view, so a GOG game has no card.
-        val cardStore = com.droiddeck.launcher.stores.Store.byId(game?.source.orEmpty())?.takeIf { it == com.droiddeck.launcher.stores.Store.EPIC }
+        val cardStore = com.droiddeck.launcher.stores.Store.byId(game?.source.orEmpty())?.takeIf { it == com.droiddeck.launcher.stores.Store.EPIC || it == com.droiddeck.launcher.stores.Store.GOG }
         if (cardStore != null && game?.gameFiles != null) add { m ->
             Box(m) {
                 StoreLaunchCard(host, game.gameFiles!!, cardStore)
@@ -533,10 +502,8 @@ internal fun LaunchSettings(s: FrontEndState, a: FrontEndActions, host: MenuHost
     }
 }
 
-/** Epic's account page behind its sign-in: signing in there presents any step the account still owes. */
 private const val EPIC_RESOLVE_URL = "https://www.epicgames.com/id/login?redirectUrl=https%3A%2F%2Fwww.epicgames.com%2Faccount%2Fpersonal"
 
-/** The Epic card: the sign-in and offline switches, read from and written to the game's sidecar, and Resolve Epic sign-in. */
 @Composable
 private fun StoreLaunchCard(host: MenuHost, folder: java.io.File, store: com.droiddeck.launcher.stores.Store) {
     val appContext = androidx.compose.ui.platform.LocalContext.current.applicationContext
@@ -544,12 +511,17 @@ private fun StoreLaunchCard(host: MenuHost, folder: java.io.File, store: com.dro
     val options = sidecar?.epic ?: com.droiddeck.launcher.stores.EpicOptions()
     val epic = store == com.droiddeck.launcher.stores.Store.EPIC
     val key = "store-" + store.id
-    val value = buildList {
+    val value = if (!epic) stringResource(when {
+        !com.droiddeck.launcher.stores.gog.GogComet.enabled(appContext) || sidecar?.achievements == false -> R.string.gog_achievements_off
+        com.droiddeck.launcher.stores.gog.GogComet.status == "sign-in-needed" -> R.string.gog_achievements_signin
+        com.droiddeck.launcher.stores.gog.GogComet.status in listOf("service-unavailable", "credentials-unavailable", "not-installed") -> R.string.gog_achievements_unavailable
+        com.droiddeck.launcher.stores.gog.GogComet.status == "uploaded" -> R.string.gog_achievements_uploaded
+        com.droiddeck.launcher.stores.gog.GogComet.status == "pending-upload" || com.droiddeck.launcher.stores.gog.GogComet.status == "unlocked-locally" -> R.string.gog_achievements_pending
+        else -> R.string.gog_achievements_on
+    }) else buildList {
         if (epic && options.offline) add(stringResource(R.string.epic_card_offline))
         else if (epic && options.eos) add(stringResource(R.string.epic_card_eos))
     }.ifEmpty { listOf(stringResource(R.string.epic_card_none)) }.joinToString(" · ")
-    // Each switch goes straight to the sidecar on disk - both launch paths read it there - and the
-    // card shows what was read back, so a write that did not take is never shown as done.
     fun set(change: (com.droiddeck.launcher.stores.EpicOptions) -> com.droiddeck.launcher.stores.EpicOptions) {
         Thread({
             val written = runCatching { com.droiddeck.launcher.stores.StoreGameSidecar.updateEpic(folder, change) }
@@ -563,13 +535,21 @@ private fun StoreLaunchCard(host: MenuHost, folder: java.io.File, store: com.dro
         host.open = if (host.open == key) null else key
     }
     AnchoredMenu(host.open == key, onDismiss = { if (host.open == key) host.open = null }, title = store.shortLabel) { first ->
+        if (!epic) {
+            MenuItem(stringResource(R.string.gog_achievements), checked = sidecar?.achievements != false, focusRequester = first,
+                detail = if (!com.droiddeck.launcher.stores.gog.GogComet.enabled(appContext)) stringResource(R.string.gog_achievements_enable_store) else null) {
+                val on = sidecar?.achievements == false
+                Thread({
+                    val written = runCatching { com.droiddeck.launcher.stores.StoreGameSidecar.updateAchievements(folder, on) }.getOrNull()
+                    com.droiddeck.launcher.stores.StoresState.post { sidecar = written ?: sidecar }
+                }, "gog-game-achievements").start()
+            }
+        }
         if (epic) {
             MenuItem(stringResource(R.string.epic_eos), checked = options.eos, focusRequester = first) { set { it.copy(eos = !it.eos) } }
             MenuItem(stringResource(R.string.epic_offline), checked = options.offline) { set { it.copy(offline = !it.offline) } }
         }
         if (epic) {
-        // Epic asks some accounts to accept something once (privacy policy, EULA) before a game may
-        // sign in - EOS's "corrective action". Signing in on Epic's site shows it.
         MenuItem(stringResource(R.string.epic_resolve), checked = false) {
             host.open = null
             runCatching {
@@ -604,10 +584,6 @@ private fun SettingCard(label: String, value: String, id: String, modifier: Modi
     }
 }
 
-/**
- * The app's language: "System default" (what Android uses, named in brackets) or one of the
- * languages the app ships, each in its own script. Steam is set to the same language when it starts.
- */
 @Composable
 private fun LanguageRow(host: MenuHost, chosen: String, onPick: (String) -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current

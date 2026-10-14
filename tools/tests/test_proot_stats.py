@@ -1,4 +1,4 @@
-"""proot's stop counters (patch 0015, PROOT_STATS) and the fast path's live counter files
+"""proot's stop counters (patch 0016, PROOT_STATS) and the fast path's live counter files
 (PROOT_FP_STATS_DIR), under a proot built for this host by tools/proot/bench/host-proot.sh:
 
     tools/proot/bench/host-proot.sh /tmp/host-proot

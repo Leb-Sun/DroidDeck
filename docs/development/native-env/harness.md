@@ -17,7 +17,7 @@ log folder, rewritten at every milestone (so a session that dies still leaves th
   (→ the first launch), launch → focus, and in game (→ the game's exit, or the end).
 - **Per phase:**
   - proot stops per second, by kind and per syscall, and the time proot spent handling them
-    (`PROOT_STATS`, patch 0015);
+    (`PROOT_STATS`, patch 0016);
   - the tracer's CPU (`/proc/<proot>/stat`) and the whole session tree's CPU, as % of one core;
   - every tracer on its own (`tracers`: role, pid, stops/s, tracer %), and the tree under all of
     them;

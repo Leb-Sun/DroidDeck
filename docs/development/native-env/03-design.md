@@ -865,7 +865,7 @@ Missing, and added (†):
 | `rssMb {main, game, t1Tree, t2Tree}`; `device.memoryLimiter` | `/proc/<pid>/status` `VmRSS`; cgroup v2 files | M2, M10 |
 | `teardownMs` (stop → every session process gone) | `session.teardown_done` event | M3 |
 | `spawn {handoffMs, fallbacks[]}`; `:game` cpuset and cgroup | `GameSpawner` events | M10 |
-| `killed9` stop count | patch 0015 file v2: tracee deaths by `SIGKILL` | M2 |
+| `killed9` stop count | patch 0016 file v2: tracee deaths by `SIGKILL` | M2 |
 | `device.caps` | probe cache | M1, M11, M14 |
 | `glibc {state, pkgver}` | `/etc/droiddeck/glibc-state` | M13–M17 |
 | `hints {adpf, tids, reports, gameState}` | `PerfHints` | M6–M8 |
@@ -884,7 +884,7 @@ run shows a win (`PLAN.md` "Phase 4").
 
 | key | mechanism | type, default | effective only if | guest or proot effect |
 |---|---|---|---|---|
-| `prootExitKill` | `PTRACE_O_EXITKILL` and `SIGQUIT` teardown | bool, off | — | `PROOT_EXIT_KILL=1` in proot's env (patch 0016, inert without it) |
+| `prootExitKill` | `PTRACE_O_EXITKILL` and `SIGQUIT` teardown | bool, off | — | `PROOT_EXIT_KILL=1` in proot's env (patch 0017, inert without it) |
 | `auditScope` | `libblaudit` scope | `off` / `proton` / `client` / `session`, **`proton`** | `prootFastPath` | `LD_AUDIT` placement |
 | `fastPathFolded` | fast path inside `libblsession` | bool, off | `prootFastPath` | preload list and order; `BL_FP_FOLDED=1` |
 | `fastPathOpenat2` | `openat2` open family | bool, off | `prootFastPath` and probe `openat2` | `PROOT_FP_OPENAT2=1` |
@@ -932,7 +932,7 @@ run shows a win (`PLAN.md` "Phase 4").
 - **House style:**
   - Kotlin `object`s and `SessionPart`s;
   - comments that explain why, in prose;
-  - proot patches that are inert unless an env var is set, as 0014 and 0015 are;
+  - proot patches that are inert unless an env var is set, as 0014, 0016 and 0017 are;
   - the `BL_*`, `PROOT_FP_*` and `PROOT_*` env namespaces;
   - commit subjects in `feat:`, `fix:` and `docs:` form, with no AI co-author trailers
     (`PLAN.md` decision log).
@@ -971,7 +971,7 @@ in the acceptance of M1 and M13–M16. Item 7, 16 KB pages, is tracked apart (`P
 | M0 | Harness: several tracers, process accounting, frames, power, memory, teardown, `--ab`, `perf-compare` | — | M | none | Every † field present; 3 baseline runs with spread ≤ 10% for READY, Big Picture and launch → focus | yes |
 | M1 | Capability probe in a forked child; caps in the report and in `BL_NATIVE_BLOCK`/`BL_CAPS` | 2 | S | none | `device.caps`† matches `02` §3 for the device's release; the probe's aarch64 syscall numbers equal the device headers and `seccomp-launch --dump aarch64` (`04` device check 1); the mask matches the real policy per Android version (`04` device check 3); READY within ±2% (cached) | yes |
 | M2 | Phantom count, exit reasons, MemoryLimiter readout | 1 | S | none | `peakPhantoms`†, `killed9`†, `app.exit_reason` for a forced kill of `:game` | yes |
-| M3 | proot 0016: `PTRACE_O_EXITKILL` with `--kill-on-exit`; `SIGQUIT` teardown | 1 | S | none | Host: 0 tracees survive a `SIGKILL`ed proot. Device: `teardownMs`† down ≈1.2 s when the tree is alive at stop | yes |
+| M3 | proot 0017: `PTRACE_O_EXITKILL` with `--kill-on-exit`; `SIGQUIT` teardown | 1 | S | none | Host: 0 tracees survive a `SIGKILL`ed proot. Device: `teardownMs`† down ≈1.2 s when the tree is alive at stop | yes |
 | M4 | `libblaudit` scope (`auditScope`) | 2 | S | none | `client`: `openat` stops in startup and READY → Big Picture ≥ 20% lower; fp hit % per group within ±1 pt; READY and Big Picture no worse; no "wrong ELF class" in `session.log` | yes |
 | M5 | Fold `libblfastpath` into `libblsession` (load order moved) | 2 | M | none | startup stops per exec (stops ÷ `exec` kind) lower by ≥ 1; READY no worse; equivalence suites identical; `in_game` fps ±2% and p99† no worse | yes |
 | M6 | `setGameState(loading)` | 1 | S | none | launch → focus and Big Picture time no worse; `hints.gameState`† transitions logged. On if either time improves ≥ 5% | yes |

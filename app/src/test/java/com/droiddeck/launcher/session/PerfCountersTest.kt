@@ -10,7 +10,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 class PerfCountersTest {
-    /** proot's stop counter file as patch 0015 lays it out (tools/proot/PATCHES.md). */
+    /** proot's stop counter file as patch 0016 lays it out (tools/proot/PATCHES.md). */
     private fun stopsFile(rows: List<Pair<String, LongArray>>, kinds: LongArray, magic: String = "PRSTATS\u0000", version: Int = 1): ByteArray {
         val header = 328
         val nameSize = 32

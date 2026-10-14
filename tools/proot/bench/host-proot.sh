@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds this repo's proot (source.env plus patches/, applied in build.sh's order) natively on a
 # Linux host, for the host tests (tools/tests/test_proot_stats.py). Needs a C compiler, ld.lld for
-# the loader's link flags, and talloc's headers and library (Debian/Ubuntu: libtalloc-dev).
+# the loader's link flags, talloc's headers and library (Debian/Ubuntu: libtalloc-dev),
+# and gawk: the loader info step calls awk's strtonum, which mawk does not have.
 #
 #   tools/proot/bench/host-proot.sh OUTDIR                       # fetches termux/proot
 #   PROOT_SRC=<pristine checkout at PROOT_COMMIT> tools/proot/bench/host-proot.sh OUTDIR
@@ -20,6 +21,8 @@ else
   mkdir -p "$WORK/proot"
   tar -xzf "$WORK/proot.tar.gz" -C "$WORK/proot" --strip-components=1
 fi
+# 0015 includes this header. It ships beside the patches, not inside termux/proot.
+cp "$HERE/statx_mnt_id.h" "$WORK/proot/src/tracee/statx_mnt_id.h"
 for patch in "$HERE"/patches/*.patch; do
   patch -d "$WORK/proot" -p1 --forward --quiet < "$patch"
 done

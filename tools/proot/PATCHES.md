@@ -78,8 +78,16 @@ Added by DroidDeck:
   exit.c act on (`TCSETSF`, the four termios2 requests, `FICLONE`) and allows the rest at once, and
   the ioctl block is emitted first (after WinNative 53836ca9, which traces only the termios2 ones).
   The `faccessat2` exit stop (termux 5ba8b95, for glibc's ENOSYS fallback on kernels before 5.8) and
-  the `statx` one (emulation on kernels before 4.11) are dropped when the running kernel is newer.
+  the `statx` one (emulation on kernels before 4.11) are dropped on kernels 5.8 and newer; patch
+  `0015` keeps it on 4.11–5.7 to return the mount ID added in 5.8.
   Host build: `ioctl` 31.6 -> 0.5 us; `stat`/`statx`/`faccessat2` about 44 -> 28 us (one stop).
+- `0015-statx-mnt-id-fdinfo.patch` - kernels before 5.8 can complete `statx` without the mount ID
+  that libglnx requires while chasing an open descriptor. PRoot keeps the exit stop on those
+  kernels and fills only a missing ordinary `STATX_MNT_ID` for `AT_EMPTY_PATH` after pinning the
+  tracee descriptor, matching its device and inode to the successful statx result, and reading
+  `mnt_id` from the pin's fdinfo. A later close/reuse of the tracee fd cannot redirect that read;
+  a concurrent reuse for the same inode through a different bind mount is indistinguishable at
+  the exit stop. It does not synthesize `STATX_MNT_ID_UNIQUE`.
 
 Prototype (inert unless `PROOT_FASTPATH` is set; see `docs/development/proot-performance.md`):
 
@@ -95,7 +103,7 @@ Prototype (inert unless `PROOT_FASTPATH` is set; see `docs/development/proot-per
 
 Measurement (inert unless `PROOT_STATS` is set; see `docs/development/native-env/harness.md`):
 
-- `0015-stop-counters.patch` - with `PROOT_STATS=<file>`, the tracer creates that file once its
+- `0016-stop-counters.patch` - with `PROOT_STATS=<file>`, the tracer creates that file once its
   first tracee runs, maps it `MAP_SHARED` and counts in it as it goes, so another process can read
   it at any moment: no signal, no syscall on the tracer's side, nothing to flush at exit. Every stop
   is counted by kind (seccomp entry, `PTRACE_SYSCALL` entry and exit, `SIGSYS`, the clone, fork,
@@ -114,7 +122,7 @@ Measurement (inert unless `PROOT_STATS` is set; see `docs/development/native-env
 Supervision (inert unless `PROOT_EXIT_KILL` is set; see `docs/development/native-env/03-design.md`
 §2.1):
 
-- `0016-exit-kill.patch` - `--kill-on-exit` takes the tracees down only when proot gets to run its
+- `0017-exit-kill.patch` - `--kill-on-exit` takes the tracees down only when proot gets to run its
   own cleanup, and `SIGKILL` never lets it: a proot killed by Android, the low memory killer or the
   app left every tracee running with no tracer, where each syscall the seccomp filter traces fails
   with ENOSYS. With `PROOT_EXIT_KILL` in proot's environment and `--kill-on-exit`, the options proot
@@ -124,5 +132,5 @@ Supervision (inert unless `PROOT_EXIT_KILL` is set; see `docs/development/native
   Without the variable the options are today's. The app sets it with Performance > proot exit kill
   (`prootExitKill`), which also stops a session's proot with `SIGQUIT`: proot ignores `SIGTERM`, and
   on `SIGQUIT` it kills every tracee itself and leaves through its event loop (`event.c`,
-  `kill_all_tracees2`). Host test: `tools/tests/test_proot_exitkill.py`; against 0001-0015 its five
-  tracees outlive a `SIGKILL`ed proot, with 0016 none does.
+  `kill_all_tracees2`). Host test: `tools/tests/test_proot_exitkill.py`; against 0001-0016 its five
+  tracees outlive a `SIGKILL`ed proot, with 0017 none does.

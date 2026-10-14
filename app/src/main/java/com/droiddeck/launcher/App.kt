@@ -23,13 +23,13 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         CrashHandler.install(this)
+        com.droiddeck.launcher.session.QuestExperimental.initialize(this)
         com.droiddeck.launcher.session.SessionPrefs.settleGpuDriverMode(this)
         com.droiddeck.launcher.update.AppUpdates.init(this)
         GpuClockPin.clearLeftover(this)
         SpawnServer.register(SpawnServer.SANDBOX, BwrapSpawner)
         SpawnServer.start(this)
         com.droiddeck.launcher.frontend.GameFileSync.start(this)
-        // The game stores the Stores section can talk to; the native engine loads only when one needs it.
         com.droiddeck.launcher.stores.StoresState.init(this)
         com.droiddeck.launcher.stores.StoresState.register(com.droiddeck.launcher.stores.gog.GogBackend)
         com.droiddeck.launcher.stores.StoresState.register(com.droiddeck.launcher.stores.epic.EpicBackend)

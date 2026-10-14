@@ -1,4 +1,4 @@
-"""proot's exit kill (patch 0016, PROOT_EXIT_KILL) and the SIGQUIT teardown the app uses with it,
+"""proot's exit kill (patch 0017, PROOT_EXIT_KILL) and the SIGQUIT teardown the app uses with it,
 under a proot built for this host by tools/proot/bench/host-proot.sh:
 
     tools/proot/bench/host-proot.sh /tmp/host-proot

@@ -28,7 +28,6 @@ VERSION = "bubblewrap 0.11.0 (droiddeck)"
 # Signals that end the stand-in, which ends the sandbox: each goes to the app first (frame K).
 FORWARDED = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGQUIT, signal.SIGUSR1)
 
-# Options and how many arguments each takes; bwrap(1).
 NO_ARG = {
     "--unshare-user", "--unshare-user-try", "--unshare-ipc", "--unshare-pid", "--unshare-net",
     "--unshare-uts", "--unshare-cgroup", "--unshare-cgroup-try", "--unshare-all", "--share-net",
@@ -73,7 +72,6 @@ def expand(argv):
         a = argv[i]
         if a == "--args" and i + 1 < len(argv):
             data = read_fd(int(argv[i + 1]))
-            # Each argument ends in a NUL; an empty one (--setenv LD_LIBRARY_PATH "") is kept.
             parts = data.split(b"\0")
             if parts and parts[-1] == b"":
                 parts.pop()
@@ -160,7 +158,6 @@ def parse(argv):
         elif a == "--dev":
             s.ops.append({"t": "dev", "dest": args[0]})
         elif a in ("--seccomp", "--add-seccomp-fd"):
-            # proot is the sandbox; there is no filter to install under it.
             os.close(int(args[0]))
         elif a == "--block-fd":
             read_fd(int(args[0]))
@@ -170,8 +167,6 @@ def parse(argv):
             s.info_fds.append(int(args[0]))
         elif a == "--json-status-fd":
             s.json_fds.append(int(args[0]))
-        # Everything else - namespaces, capabilities, labels, locks, --remount-ro, --chmod - has
-        # nothing to act on under proot.
     if not s.command:
         sys.stderr.write("bwrap: No command specified\n")
         sys.exit(1)
@@ -201,7 +196,6 @@ def remaps_nothing(s):
             if not os.path.islink(op["dest"]) or os.readlink(op["dest"]) != op["target"]:
                 return False
         elif t == "file":
-            # The D-Bus proxy's /.flatpak-info names the app to the bus; nothing here reads it.
             if op["dest"] != "/.flatpak-info":
                 return False
         elif t == "dir":
@@ -305,7 +299,6 @@ def run_by_app(s):
     for op in s.ops:
         op = dict(op)
         if op["t"] == "bind":
-            # The app resolves no guest symlinks; hand it the path they lead to.
             op["src"] = real(op["src"])
         if op["t"] == "file":
             op["data"] = base64.b64encode(op["data"]).decode()

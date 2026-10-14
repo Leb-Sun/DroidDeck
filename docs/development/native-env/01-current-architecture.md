@@ -716,7 +716,7 @@ teardown, and collects artifacts for failures (`tools/scenarios/*.json`).
 
 | doc says | code says |
 |---|---|
-| The fast path is a prototype, opt-in (`:36-43,260-263`); PATCHES.md calls 0014 "Prototype (inert unless PROOT_FASTPATH is set)" (`tools/proot/PATCHES.md:84`) | Default **on** (`SessionPrefs.kt:394`), wired with a keyed handshake |
+| The fast path is a prototype, opt-in (`:36-43,260-263`); PATCHES.md calls 0014 "Prototype (inert unless PROOT_FASTPATH is set)" (`tools/proot/PATCHES.md:92`) | Default **on** (`SessionPrefs.kt:335`), wired with a keyed handshake |
 | `..`, a final symlink and `/proc` always go to proot; parents are verified with one `O_PATH` plus readlink (`:268-279`) | Full component walk with symlink and `/proc` emulation (`fastpath.c:10-21,620-706`) |
 | The write family and sockets are "next" (`:206,312`) | Done (§5) |
 | Integration into `libblsession` is planned (`:303-306`) | Not done: a separate library, loaded last |

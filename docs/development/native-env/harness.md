@@ -190,7 +190,7 @@ tools/perf-compare ~/runs/perf-baseline-<date>-<time>
 
 - `cache/perf` is emptied whenever a session starts, so no earlier counters reach a report. The raw
   files stay out of the logs; only the two reports go in.
-- The proot file's layout is in `tools/proot/PATCHES.md` (0015).
+- The proot file's layout is in `tools/proot/PATCHES.md` (0016).
 - A fast-path file is:
   - an 8-byte magic `FPSTATS\0`, written last;
   - `u32` version (1), number of families (7), pid, reserved;

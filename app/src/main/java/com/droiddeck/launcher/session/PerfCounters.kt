@@ -37,8 +37,9 @@ data class ProcStat(
 
 /**
  * Readers for the counter files the Performance report samples (SessionPerf): proot's stop counters
- * (PROOT_STATS, tools/proot/patches/0015 - the layout is in tools/proot/PATCHES.md) and the fast
- * path's per-process files (PROOT_FP_STATS_DIR, live_counters in tools/proot/fastpath/fastpath.c).
+ * (PROOT_STATS, tools/proot/patches/0016-stop-counters.patch - the layout is in tools/proot/PATCHES.md)
+ * and the fast path's per-process files (PROOT_FP_STATS_DIR, live_counters in
+ * tools/proot/fastpath/fastpath.c).
  * Both are written in the device's byte order, little-endian on every arch the app ships. A file
  * whose magic is not there yet - mapped but not filled in - reads as null.
  */

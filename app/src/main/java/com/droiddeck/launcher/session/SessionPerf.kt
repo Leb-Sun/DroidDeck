@@ -33,7 +33,8 @@ import java.util.concurrent.TimeUnit
  * The Performance report (Performance > Performance report, off by default; off, nothing here runs):
  * the baseline the native-environment work is measured against (docs/development/native-env/harness.md).
  *
- * On, proot keeps its stop counters in cache/perf/proot.stats (PROOT_STATS, tools/proot/patches/0015)
+ * On, proot keeps its stop counters in cache/perf/proot.stats (PROOT_STATS,
+ * tools/proot/patches/0016-stop-counters.patch)
  * and every guest process its fast-path hits and misses in cache/perf/fastpath/ (PROOT_FP_STATS_DIR).
  * Both are files their writers map MAP_SHARED, so they are read here whenever a milestone passes,
  * with nothing asked of proot: the session created, proot started, the first frame, READY, Big

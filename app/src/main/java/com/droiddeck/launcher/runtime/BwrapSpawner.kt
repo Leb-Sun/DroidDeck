@@ -25,8 +25,7 @@ import java.nio.file.Files
  * status back until one side goes away: the stand-in ending takes the sandbox down with it.
  *
  * The request comes through SpawnServer, as its "sandbox" kind; the socket, its frames and who may
- * connect are described there. The socket name is the package's, so a test install does not share
- * it with the released app.
+ * connect are described there.
  */
 object BwrapSpawner : SpawnServer.Handler {
     private const val TAG = "BwrapSpawner"

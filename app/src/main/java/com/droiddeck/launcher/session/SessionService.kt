@@ -418,7 +418,7 @@ class SessionService : Service() {
             hostEnv["PROOT_NO_SECCOMP"] = "1"
             Log.i(TAG, "proot: seccomp acceleration off by request")
         }
-        // Patch 0016: the kernel kills every tracee when proot dies, even by SIGKILL (see teardown).
+        // Patch 0017: the kernel kills every tracee when proot dies, even by SIGKILL (see teardown).
         if (SessionPrefs.prootExitKill(this)) {
             hostEnv["PROOT_EXIT_KILL"] = "1"
             Log.i(TAG, "proot: exit kill on")
